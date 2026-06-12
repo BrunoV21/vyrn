@@ -1,0 +1,76 @@
+---
+layout: home
+
+hero:
+  name: "vyrn"
+  text: "Token-efficient agents for small contexts"
+  tagline: "A Rust CLI agent for local and small OpenAI-compatible models."
+  actions:
+    - theme: brand
+      text: "Get Started"
+      link: /getting-started/
+    - theme: alt
+      text: "Commands"
+      link: /commands/
+    - theme: alt
+      text: "Architecture"
+      link: /concepts/architecture
+    - theme: alt
+      text: "GitHub"
+      link: https://github.com/BrunoV21/vyrn
+
+features:
+  - title: "Small context first"
+    details: "The prompt, machine manifest, core tools, and history model are built for limited context windows."
+  - title: "Rust package"
+    details: "vyrn is scoped as a Rust CLI package. No npm mirror, hosted service, Docker workspace, or GUI is part of the current product."
+  - title: "OpenAI compatible"
+    details: "Connect to Ollama, LM Studio, Groq, Together AI, OpenRouter, or any endpoint that implements OpenAI chat completions."
+  - title: "Rolling summaries"
+    details: "Each request refreshes a compact summary instead of resending full conversation history."
+  - title: "Raw batch power"
+    details: "The batch tool is the primary extension primitive for shell work, scripts, installs, and host inspection."
+  - title: "Token savings"
+    details: "Every completed turn reports tokens sent, tokens saved, and total saved for the session."
+  - title: "Open standards"
+    details: "Skills use Agent Skills protocol, while MCP configuration follows .mcp.json conventions."
+---
+
+<div class="vy-terminal">
+<strong>$ vyrn --models</strong><br>
+&gt; using llama3 @ localhost:11434<br>
+&gt; manifest: <span class="grid">git, curl, cargo, python3</span><br>
+&gt; context budget: 4096 tokens<br>
+<br>
+<strong>you:</strong> summarize this repo and find the next implementation step<br>
+<span class="ok">ok tokens sent: 812 | saved: 3,204 | session total saved: 11,847</span>
+</div>
+
+## The idea
+
+Most CLI agents are comfortable spending a large context budget before the user asks for anything. vyrn is built for the opposite environment: small local models, fast terminal workflows, and users who care about every token that enters the prompt.
+
+vyrn keeps the core prompt and tool list tiny, makes capability load progressively through skills and MCP discovery, and treats token savings as visible product behavior.
+
+## Install
+
+```bash
+git clone https://github.com/BrunoV21/vyrn.git
+cd vyrn
+cargo build
+cargo test
+```
+
+Once published:
+
+```bash
+cargo install vyrn
+vyrn --models
+```
+
+## Next steps
+
+1. Read the [getting started guide](./getting-started/).
+2. Review the [command surface](./commands/).
+3. Understand [rolling context management](./concepts/context-management.md).
+4. Check the [roadmap](./roadmap.md).

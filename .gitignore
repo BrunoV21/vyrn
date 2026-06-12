@@ -1,0 +1,8 @@
+target/
+
+node_modules/
+docs/official/.vitepress/cache/
+docs/official/.vitepress/dist/
+
+.DS_Store
+*.log

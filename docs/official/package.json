@@ -1,0 +1,14 @@
+{
+  "name": "vyrn-docs",
+  "homepage": "https://BrunoV21.github.io/vyrn/",
+  "version": "0.1.0",
+  "scripts": {
+    "docs:dev": "vitepress dev",
+    "docs:build": "vitepress build",
+    "docs:preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "vitepress": "^2.0.0-alpha.17",
+    "vitepress-mermaid-renderer": "1.1.23"
+  }
+}
