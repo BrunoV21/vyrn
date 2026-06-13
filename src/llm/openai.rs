@@ -21,8 +21,12 @@ pub enum LlmError {
     },
     #[error("failed to parse stream event: {0}")]
     ParseStream(String),
+    #[error("{0}")]
+    Input(String),
     #[error("model response did not include a choice")]
     MissingChoice,
+    #[error("turn canceled")]
+    Canceled,
 }
 
 #[derive(Debug, Clone)]

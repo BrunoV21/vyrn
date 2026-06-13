@@ -1,4 +1,4 @@
-use crate::llm::ChatMessage;
+use crate::llm::{ChatMessage, ContentPart, MessageContent};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenEstimate {
@@ -62,7 +62,7 @@ pub fn estimate_messages_tokens(messages: &[ChatMessage]) -> usize {
     for message in messages {
         total += estimate_text_tokens(&message.role) + 4;
         if let Some(content) = &message.content {
-            total += estimate_text_tokens(content);
+            total += estimate_content_tokens(content);
         }
         if let Some(tool_calls) = &message.tool_calls {
             for call in tool_calls {
@@ -72,4 +72,19 @@ pub fn estimate_messages_tokens(messages: &[ChatMessage]) -> usize {
         }
     }
     total
+}
+
+fn estimate_content_tokens(content: &MessageContent) -> usize {
+    match content {
+        MessageContent::Text(text) => estimate_text_tokens(text),
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .map(|part| match part {
+                ContentPart::Text { text } => estimate_text_tokens(text),
+                // Image token accounting is endpoint-specific. Use a bounded placeholder
+                // instead of counting base64 bytes as prompt text.
+                ContentPart::ImageUrl { .. } => 256,
+            })
+            .sum(),
+    }
 }

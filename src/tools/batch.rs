@@ -30,7 +30,7 @@ impl Tool for BatchTool {
     }
 
     fn compact_description(&self) -> &'static str {
-        "run shell commands"
+        "run shell commands in cwd by default"
     }
 
     fn json_schema(&self) -> Value {
@@ -65,11 +65,7 @@ impl Tool for BatchTool {
                 message: error.to_string(),
             })?;
 
-        Ok(ToolResult {
-            name: self.name().to_string(),
-            content,
-            refresh_manifest: false,
-        })
+        Ok(ToolResult::text(self.name(), content))
     }
 }
 
@@ -77,6 +73,7 @@ async fn run_command(command: String) -> Result<BatchCommandResult, ToolError> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut child = Command::new(shell);
     child.arg("-lc").arg(&command);
+    child.kill_on_drop(true);
 
     let output = match timeout(Duration::from_secs(COMMAND_TIMEOUT_SECONDS), child.output()).await {
         Ok(output) => output?,

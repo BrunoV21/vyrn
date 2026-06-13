@@ -65,11 +65,7 @@ impl Tool for ReadFileTool {
             });
         }
         let content = tokio::fs::read_to_string(&path).await?;
-        Ok(ToolResult {
-            name: self.name().to_string(),
-            content,
-            refresh_manifest: false,
-        })
+        Ok(ToolResult::text(self.name(), content))
     }
 }
 
@@ -102,11 +98,10 @@ impl Tool for WriteFileTool {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(&path, input.content).await?;
-        Ok(ToolResult {
-            name: self.name().to_string(),
-            content: format!("wrote {}", path.display()),
-            refresh_manifest: false,
-        })
+        Ok(ToolResult::text(
+            self.name(),
+            format!("wrote {}", path.display()),
+        ))
     }
 }
 
@@ -160,11 +155,10 @@ impl Tool for EditFileTool {
 
         let edited = content.replacen(&input.old, &input.new, 1);
         tokio::fs::write(&path, edited).await?;
-        Ok(ToolResult {
-            name: self.name().to_string(),
-            content: format!("edited {}", path.display()),
-            refresh_manifest: false,
-        })
+        Ok(ToolResult::text(
+            self.name(),
+            format!("edited {}", path.display()),
+        ))
     }
 }
 

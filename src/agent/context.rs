@@ -1,7 +1,8 @@
+use crate::agent::prompt::build_summary_refresh_messages;
 use crate::agent::tokens::{estimate_messages_tokens, estimate_text_tokens};
 use crate::agent::transcript::Exchange;
 use crate::config::SummaryAggressiveness;
-use crate::llm::{ChatCompletionRequest, ChatMessage, LlmError, OpenAiClient};
+use crate::llm::{ChatCompletionRequest, LlmError, OpenAiClient};
 
 #[derive(Debug, Clone)]
 pub struct ContextManager {
@@ -66,21 +67,12 @@ impl ContextManager {
 
         let aggressiveness = self.effective_aggressiveness(estimated_next_prompt_tokens);
         let include_tool_results = matches!(aggressiveness, SummaryAggressiveness::Low);
-        let current_summary = self.summary.as_deref().unwrap_or("none");
-        let prompt = format!(
-            "Update the session summary for the next turn.\n\
-Keep the user's original high-level goal, constraints, decisions, paths touched, and open tasks.\n\
-Drop raw tool output that is no longer needed.\n\
-Aggressiveness: {aggressiveness}.\n\n\
-Current summary:\n{current_summary}\n\n\
-Last exchange:\n{}",
-            exchange.compact(include_tool_results)
+        let messages = build_summary_refresh_messages(
+            aggressiveness,
+            self.summary.as_deref(),
+            exchange,
+            include_tool_results,
         );
-
-        let messages = vec![
-            ChatMessage::system("You rewrite compact agent session summaries."),
-            ChatMessage::user(prompt),
-        ];
         let sent = estimate_messages_tokens(&messages);
         let response = client
             .complete_chat(ChatCompletionRequest {
@@ -94,7 +86,7 @@ Last exchange:\n{}",
         let summary = response
             .choices
             .first()
-            .and_then(|choice| choice.message.content.clone())
+            .and_then(|choice| choice.message.content_text().map(str::to_string))
             .unwrap_or_default();
         self.summary = Some(summary.trim().to_string());
         Ok(Some(
@@ -105,8 +97,14 @@ Last exchange:\n{}",
         ))
     }
 
-    pub fn estimate_would_be_tokens(&self, system: &str, user_input: &str) -> usize {
+    pub fn estimate_would_be_tokens(
+        &self,
+        system: &str,
+        user_input: &str,
+        image_count: usize,
+    ) -> usize {
         let mut total = estimate_text_tokens(system) + estimate_text_tokens(user_input);
+        total += image_count * 256;
         if let Some(summary) = &self.summary {
             total += estimate_text_tokens(summary);
         }

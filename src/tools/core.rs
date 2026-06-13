@@ -1,3 +1,4 @@
+use crate::llm::ImageAttachment;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,6 +23,19 @@ pub struct ToolResult {
     pub content: String,
     #[serde(default)]
     pub refresh_manifest: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
+}
+
+impl ToolResult {
+    pub fn text(name: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            content: content.into(),
+            refresh_manifest: false,
+            images: Vec::new(),
+        }
+    }
 }
 
 #[async_trait]
@@ -52,6 +66,7 @@ impl ToolRegistry {
     pub fn core() -> Self {
         let mut registry = Self::default();
         registry.insert(crate::tools::file::ReadFileTool);
+        registry.insert(crate::tools::image::ReadImageTool);
         registry.insert(crate::tools::file::WriteFileTool);
         registry.insert(crate::tools::file::EditFileTool);
         registry.insert(crate::tools::batch::BatchTool);
@@ -108,10 +123,8 @@ impl Tool for RefreshManifestTool {
     }
 
     async fn execute(&self, _input: Value) -> Result<ToolResult, ToolError> {
-        Ok(ToolResult {
-            name: self.name().to_string(),
-            content: "manifest refresh requested".to_string(),
-            refresh_manifest: true,
-        })
+        let mut result = ToolResult::text(self.name(), "manifest refresh requested");
+        result.refresh_manifest = true;
+        Ok(result)
     }
 }
