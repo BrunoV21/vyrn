@@ -2,15 +2,18 @@
 
 Slash commands are available inside an active interactive session.
 
-## `/model`
+In a real terminal, type `/` and press `Tab` to autocomplete slash commands.
+
+## `/models`
 
 Switch the active model profile without leaving the session.
 
 ```text
-/model
+/models
 ```
 
-The session summary remains active unless the user also clears it.
+The selected model is stored as the last selected model for future sessions. `/model`
+is kept as an alias.
 
 ## `/stats`
 
@@ -20,7 +23,9 @@ Print full token usage for the current session.
 /stats
 ```
 
-The compact stats line still appears after each completed request.
+The compact status row still updates after each completed request.
+
+In verbose mode, `/stats` also includes per-call accounting for each turn.
 
 ## `/manifest`
 
@@ -54,13 +59,14 @@ Only skill names and descriptions should be shown until a skill is activated.
 
 ## `/clear`
 
-Reset the session summary and history.
+Reset the session summary/history and clear the terminal UI.
 
 ```text
 /clear
 ```
 
 This should not delete config files, skills, or model profiles.
+It also resets the in-memory token ledger for the current session.
 
 ## `/exit`
 

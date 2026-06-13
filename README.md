@@ -14,6 +14,8 @@
 
 vyrn is a token-efficient, model-agnostic CLI agent built in Rust for developers and terminal-native users running local or small LLMs. It keeps the always-loaded prompt and tool surface tiny, uses raw shell batching as the main power primitive, and tracks token savings as a first-class product signal.
 
+The interactive interface uses native terminal scrollback with `crossterm` raw-mode input. Real terminals get styled prompts, live streaming output, slash-command autocomplete, inline `/models` selection, running indicators, compact tool previews, and a composer status row; piped or scripted runs fall back to plain text.
+
 ```text
 ┌──────────────┐   compact prompt    ┌──────────────┐
 │ User / TTY   │ ──────────────────> │ vyrn agent   │
@@ -34,8 +36,9 @@ vyrn is a token-efficient, model-agnostic CLI agent built in Rust for developers
 - **Small context first:** the system prompt, core tools, manifest, and history strategy are designed for tight context windows.
 - **Model-agnostic:** any OpenAI-compatible endpoint can work, including Ollama, LM Studio, Groq, Together AI, OpenRouter, or a custom local server.
 - **Raw power primitive:** `batch` is the main extension point for shell work, installs, scripts, and host inspection.
+- **Terminal UI:** real terminal sessions use a styled native-scrollback chat surface instead of a bare line prompt.
 - **Rolling summaries:** conversation history is compressed into a living summary instead of resent wholesale on every turn.
-- **Visible savings:** each completed request reports tokens sent, tokens saved, and session total saved.
+- **Visible savings:** each completed request reports tokens sent, tokens saved, session saved, and current context footprint.
 - **Open standards:** skills follow Agent Skills protocol, and MCP config follows `.mcp.json` conventions.
 
 ## Installation
@@ -72,19 +75,42 @@ api_key = ""
 Start an interactive session:
 
 ```bash
-vyrn --models
+cargo run -- --models
 ```
 
 Expected session shape:
 
 ```text
-> using llama3 @ localhost:11434
-> manifest: git, curl, node, python3
-> context budget: 4096 tokens
++------------------------------------------------------+
+|          __     __ __   __ ____  _   _              |
+|          \ \   / / \ \ / /|  _ \| \ | |             |
+|           \ \ / /   \ V / | |_) |  \| |             |
+|            \ V /     | |  |  _ <| |\  |             |
+|             \_/      |_|  |_| \_\_| \_|             |
++------------------------------------------------------+
 
-you: refactor the auth module to use JWT
-vyrn: I'll inspect the current auth code first...
-ok  tokens sent: 812  |  saved: 3,204  |  session total saved: 11,847
+model glm-4-5-air  context 4096
+> /mo<Tab>
+> /models
+```
+
+The composer status row under the input box shows request tokens, savings, session savings,
+and the current prompt footprint against the configured context window:
+
+```text
+tokens sent: 225 | saved: 29 | session saved: 18 | context: 342/4,096
+```
+
+Inside a session, local control commands are handled by vyrn:
+
+```text
+/models     switch model profile
+/stats      show token usage
+/manifest   print compact machine manifest
+/refresh    rescan manifest
+/skills     list discovered skills
+/clear      reset session context and clear the terminal
+/exit       close the session
 ```
 
 ## Development
@@ -97,7 +123,28 @@ cargo test
 cargo run -- --models
 ```
 
+Use `--debug` when a provider request fails:
+
+```bash
+cargo run -- --debug
+```
+
+Debug mode shows the request URL, lower-level network error details, and provider
+response bodies for non-2xx HTTP responses.
+
+Run the deterministic end-to-end REPL test:
+
+```bash
+cargo test --test e2e_repl -- --nocapture
+```
+
+That test starts a local fake OpenAI-compatible `/v1/chat/completions` streaming server,
+writes a temporary `.vyrn/models.toml`, pipes input into the real `vyrn` binary, and
+verifies that a model tool call reads a file through the REPL.
+
 The current product requirements live in [`docs/prd.md`](docs/prd.md). Keep implementation, CLI behavior, and documentation aligned with that file until the product scope changes.
+
+The developer implementation blueprint lives in [`docs/architecture/architecture.md`](docs/architecture/architecture.md).
 
 ## Documentation
 
@@ -113,9 +160,18 @@ npm run docs:dev
 
 The docs use a terminal-brutalist standard: black surfaces, violet brand/action states, cyan technical accents, and compact agent-readable pages.
 
-## Project Status
+## Implemented Surface
 
-vyrn is early Rust package infrastructure for a terminal-native, token-efficient agent. The current focus is the core REPL loop, OpenAI-compatible streaming, minimal tools, rolling context management, skills loading, and visible token savings.
+- Rust CLI package with a styled native-scrollback TTY interface and a plain-text fallback for pipes.
+- OpenAI-compatible streaming chat completions client.
+- Core tools: `read_file`, `write_file`, `edit_file`, `batch`, `refresh_manifest`.
+- Compact machine manifest for binaries, skills, and MCP server metadata.
+- Config/model loading from `.vyrn/` and `~/.vyrn/`, with global vyrn config overriding local settings.
+- Rolling summary context manager and visible token savings ledger.
+- Agent Skills discovery by name and description.
+- `.mcp.json` parsing and merge precedence for Phase 2 MCP integration.
+
+MCP server execution is intentionally still Phase 2 work.
 
 ## License
 

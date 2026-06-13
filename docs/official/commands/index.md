@@ -10,6 +10,13 @@ vyrn has a deliberately small command surface. The primary interface is the inte
 | `vyrn --models` | Select a configured model profile before starting. |
 | `vyrn --context 2048` | Override the context budget for this session. |
 | `vyrn --verbose` | Show full token counts and raw summary information. |
+| `vyrn --debug` | Show provider URLs, network details, and response bodies on errors. |
+
+From a source checkout, prefix commands with `cargo run --`, for example:
+
+```bash
+cargo run -- --models
+```
 
 ## In-session slash commands
 
@@ -17,12 +24,12 @@ Slash commands operate inside an active `vyrn` session.
 
 | Command | Description |
 |---|---|
-| `/model` | Switch model profile mid-session. |
+| `/models` | Switch model profile mid-session. |
 | `/stats` | Show full token usage for the session. |
 | `/manifest` | Print the current machine manifest. |
 | `/refresh` | Trigger `refresh_manifest` manually. |
 | `/skills` | List discovered skills. |
-| `/clear` | Reset session summary and history. |
+| `/clear` | Reset session summary/history and clear the terminal UI. |
 | `/exit` | Exit vyrn. |
 
 ## Design rule

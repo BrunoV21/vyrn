@@ -22,6 +22,15 @@ cargo test
 cargo run -- --help
 ```
 
+Deterministic end-to-end REPL test:
+
+```bash
+cargo test --test e2e_repl -- --nocapture
+```
+
+This starts a fake local OpenAI-compatible streaming server and verifies a real `vyrn`
+binary session can execute a model-requested file tool call.
+
 Published package shape:
 
 ```bash
@@ -64,4 +73,5 @@ vyrn --models
 - Keep the always-loaded tool surface minimal.
 - Prefer `batch` for host work that does not need a dedicated compact tool.
 - Preserve the user's original high-level session goal in summaries.
-- Show token savings after each completed request.
+- Show token savings in the composer status row after each completed request.
+- Treat MCP runtime tool execution as Phase 2; current code parses MCP metadata for the manifest.

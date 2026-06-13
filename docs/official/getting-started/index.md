@@ -14,7 +14,7 @@ vyrn is designed for terminal-native users running local or small LLMs through a
 2. Start `vyrn` or `vyrn --models`.
 3. Let the startup manifest report available binaries, skills, and MCP servers.
 4. Work in the interactive REPL.
-5. Watch the token stats line after each completed request.
+5. Watch the composer status row after each completed request.
 
 ## Minimal model profile
 

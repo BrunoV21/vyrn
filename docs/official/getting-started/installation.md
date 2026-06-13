@@ -17,6 +17,22 @@ Run the package locally:
 cargo run -- --help
 ```
 
+Run the full test suite:
+
+```bash
+cargo test
+```
+
+Run the deterministic REPL end-to-end test:
+
+```bash
+cargo test --test e2e_repl -- --nocapture
+```
+
+The E2E test starts a local fake OpenAI-compatible streaming server, creates a temporary
+model profile, pipes input into the real `vyrn` binary, and verifies a tool call through
+the REPL.
+
 ## From Cargo
 
 Once published:

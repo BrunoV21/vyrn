@@ -11,7 +11,7 @@ flowchart TD
   Context --> Summary[Rolling summary]
   Tools --> Core[Core tools]
   Tools --> Skills[Skills loader]
-  Tools --> Mcp[MCP client]
+  Tools --> Mcp[MCP metadata]
   Client --> Model[Local or hosted small model]
 ```
 
@@ -25,7 +25,18 @@ flowchart TD
 | Tool executor | Runs the compact core toolset and `batch`. |
 | Machine manifest | Injects a tiny environment snapshot into the prompt. |
 | Skills loader | Implements Agent Skills progressive disclosure. |
-| MCP client | Loads `.mcp.json` servers in eager or discovery mode. |
+| MCP metadata | Parses `.mcp.json` server metadata for the manifest. MCP server execution is Phase 2. |
+
+## Current implementation
+
+- Line-oriented interactive REPL.
+- Native-scrollback terminal UI for TTY sessions, with slash autocomplete and plain-text fallback for pipes.
+- OpenAI-compatible streaming chat completions client.
+- Core tools: `read_file`, `write_file`, `edit_file`, `batch`, `refresh_manifest`.
+- Rolling summary context manager and token savings ledger.
+- Agent Skills discovery by name and description.
+- `.mcp.json` metadata parsing and merge precedence.
+- Deterministic end-to-end REPL test against a fake OpenAI-compatible streaming server.
 
 ## Scope
 

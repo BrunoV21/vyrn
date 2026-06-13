@@ -38,12 +38,11 @@ features:
 
 <div class="vy-terminal">
 <strong>$ vyrn --models</strong><br>
-&gt; using llama3 @ localhost:11434<br>
-&gt; manifest: <span class="grid">git, curl, cargo, python3</span><br>
-&gt; context budget: 4096 tokens<br>
+<span class="grid">vyrn small context first</span><br>
+model llama3 context 4096<br>
 <br>
-<strong>you:</strong> summarize this repo and find the next implementation step<br>
-<span class="ok">ok tokens sent: 812 | saved: 3,204 | session total saved: 11,847</span>
+&gt; summarize this repo and find the next implementation step<br>
+<span class="ok">tokens sent: 812 | saved: 3,204 | session saved: 11,847 | context: 1,024/4,096</span>
 </div>
 
 ## The idea

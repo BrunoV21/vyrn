@@ -9,11 +9,13 @@ Skills follow the Agent Skills protocol.
 Discovery paths, in priority order:
 
 1. `.vyrn/skills/`
-2. `.agents/skills/`
+2. `~/.vyrn/skills/`
+3. `.agents/skills/`
 
 Global config can also live under `~/.vyrn/`.
 
-At startup, vyrn should load only skill names and descriptions into the compact manifest. Full `SKILL.md` content is loaded only when the task matches that skill.
+At startup, vyrn loads only skill names and descriptions into the compact manifest.
+Full `SKILL.md` activation is part of the progressive-disclosure workflow.
 
 ## Skill format
 
@@ -38,7 +40,9 @@ description: What this skill does and when to use it.
 
 ## MCP
 
-vyrn follows `.mcp.json` conventions and supports eager or discovery mode per server.
+vyrn follows `.mcp.json` conventions. The current implementation parses server
+metadata and shows eager or lazy mode in the compact manifest. Executing MCP servers
+and loading MCP tool schemas is Phase 2 work.
 
 ```json
 {
@@ -57,4 +61,11 @@ vyrn follows `.mcp.json` conventions and supports eager or discovery mode per se
 }
 ```
 
-`eager: true` loads all tools into the prompt at startup. `eager: false` exposes only compact server metadata until the agent asks to discover tools.
+Current behavior:
+
+- `.agents/.mcp.json` and `.vyrn/.mcp.json` are loaded if present.
+- `.vyrn/.mcp.json` takes precedence by server name.
+- Servers render in the manifest as `name(eager)` or `name(lazy)`.
+
+Planned Phase 2 behavior: `eager: true` loads server tools into the prompt, while
+`eager: false` exposes compact server metadata until the agent discovers tools.
