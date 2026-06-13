@@ -3,10 +3,15 @@ use crate::agent::tokens::{TurnUsage, estimate_messages_tokens};
 use crate::agent::transcript::{Exchange, truncate};
 use crate::app::App;
 use crate::config::{ModelProfile, ModelRegistry, ModelState};
-use crate::llm::{ChatCompletionRequest, ChatMessage, LlmError, StreamEvent, ToolCall};
+use crate::llm::{
+    ChatCompletionRequest, ChatMessage, ImageAttachment, LlmError, StreamEvent, ToolCall,
+};
 use crate::tools::{MachineManifest, ToolResult};
+use crate::vision;
 use crossterm::cursor::{MoveDown, MoveToColumn, MoveUp};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor, Stylize};
 use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size};
@@ -32,11 +37,21 @@ const SLASH_COMMANDS: &[&str] = &[
 
 pub struct Repl {
     app: App,
+    prompt_history: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct UserTurnInput {
+    text: String,
+    images: Vec<ImageAttachment>,
 }
 
 impl Repl {
     pub fn new(app: App) -> Self {
-        Self { app }
+        Self {
+            app,
+            prompt_history: Vec::new(),
+        }
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
@@ -75,7 +90,13 @@ impl Repl {
                 continue;
             }
 
-            if let Err(error) = self.handle_user_turn(input.to_string()).await {
+            if let Err(error) = self
+                .handle_user_turn(UserTurnInput {
+                    text: input.to_string(),
+                    images: Vec::new(),
+                })
+                .await
+            {
                 eprintln!("error: {}", format_error(&error, self.app.debug));
             }
         }
@@ -89,101 +110,119 @@ impl Repl {
         let mut composer_status = self.composer_status_line();
 
         loop {
-            let input = read_composer_line(&composer_status)?;
-            let input = input.trim().to_string();
-            if input.is_empty() {
+            let input = read_composer_line(&composer_status, &self.prompt_history)?;
+            let input = UserTurnInput {
+                text: input.text.trim().to_string(),
+                images: input.images,
+            };
+            if input.text.is_empty() && input.images.is_empty() {
                 continue;
             }
-            if input.starts_with('/') {
+            if input.images.is_empty() && input.text.starts_with('/') {
                 if self
-                    .handle_inline_slash_command(&input, &mut composer_status)
+                    .handle_inline_slash_command(&input.text, &mut composer_status)
                     .await?
                 {
                     break;
                 }
                 continue;
             }
+            self.remember_prompt(&input.text);
             let mut spinner: Option<Spinner> = None;
             let mut assistant_prefix_printed = false;
             let mut assistant_display_started = false;
-            let result = self
-                .handle_user_turn_with(input, |update| match update {
-                    TuiUpdate::SummaryStart => {
-                        if let Some(spinner) = spinner.take() {
-                            spinner.stop();
-                        }
-                        spinner = Some(Spinner::start("integrating previous turn"));
+            let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+            let cancel_stop = Arc::new(AtomicBool::new(false));
+            let cancel_handle = spawn_escape_listener(Arc::clone(&cancel_stop), cancel_tx);
+            let turn = self.handle_user_turn_with(input, |update| match update {
+                TuiUpdate::SummaryStart => {
+                    if let Some(spinner) = spinner.take() {
+                        spinner.stop();
                     }
-                    TuiUpdate::SummaryDone => {
-                        if let Some(spinner) = spinner.take() {
-                            spinner.stop();
-                        }
+                    spinner = Some(Spinner::start("integrating previous turn"));
+                }
+                TuiUpdate::SummaryDone => {
+                    if let Some(spinner) = spinner.take() {
+                        spinner.stop();
                     }
-                    TuiUpdate::AssistantStart => {
-                        if let Some(spinner) = spinner.take() {
-                            spinner.stop();
-                        }
-                        spinner = Some(Spinner::start("thinking"));
+                }
+                TuiUpdate::AssistantStart => {
+                    if let Some(spinner) = spinner.take() {
+                        spinner.stop();
                     }
-                    TuiUpdate::AssistantDelta(delta) => {
-                        if let Some(spinner) = spinner.take() {
-                            spinner.stop();
-                        }
-                        let delta = if assistant_display_started {
-                            delta
-                        } else {
-                            delta.trim_start_matches(['\r', '\n']).to_string()
-                        };
-                        if !delta.is_empty() {
-                            assistant_display_started = true;
-                            if !assistant_prefix_printed {
-                                let _ = print_assistant_prefix();
-                                assistant_prefix_printed = true;
-                            }
-                            let _ = print_stream_text(&delta);
-                        }
+                    spinner = Some(Spinner::start("thinking"));
+                }
+                TuiUpdate::AssistantDelta(delta) => {
+                    if let Some(spinner) = spinner.take() {
+                        spinner.stop();
                     }
-                    TuiUpdate::AssistantDone => {
-                        if let Some(spinner) = spinner.take() {
-                            spinner.stop();
+                    let delta = if assistant_display_started {
+                        delta
+                    } else {
+                        delta.trim_start_matches(['\r', '\n']).to_string()
+                    };
+                    if !delta.is_empty() {
+                        assistant_display_started = true;
+                        if !assistant_prefix_printed {
+                            let _ = print_assistant_prefix();
+                            assistant_prefix_printed = true;
                         }
-                        if assistant_prefix_printed {
-                            let _ = finish_assistant_block();
-                        }
+                        let _ = print_stream_text(&delta);
                     }
-                    TuiUpdate::ToolStarted(name) => {
-                        if let Some(spinner) = spinner.take() {
-                            spinner.stop();
-                        }
-                        spinner = Some(Spinner::start(format!("running tool {name}")));
+                }
+                TuiUpdate::AssistantDone => {
+                    if let Some(spinner) = spinner.take() {
+                        spinner.stop();
                     }
-                    TuiUpdate::ToolOk { name, preview } => {
-                        if let Some(spinner) = spinner.take() {
-                            spinner.stop();
-                        }
-                        let _ = print_tool_preview(&name, &preview);
+                    if assistant_prefix_printed {
+                        let _ = finish_assistant_block();
                     }
-                    TuiUpdate::ToolError { name, error } => {
-                        if let Some(spinner) = spinner.take() {
-                            spinner.stop();
-                        }
-                        let _ = print_tool_error(&name, &error);
+                }
+                TuiUpdate::ToolStarted(name) => {
+                    if let Some(spinner) = spinner.take() {
+                        spinner.stop();
                     }
-                    TuiUpdate::Stats(stats) => {
-                        composer_status = stats;
+                    spinner = Some(Spinner::start(format!("running tool {name}")));
+                }
+                TuiUpdate::ToolOk { name, preview } => {
+                    if let Some(spinner) = spinner.take() {
+                        spinner.stop();
                     }
-                    TuiUpdate::Summary(summary) => {
-                        let _ = print_system_block(&format!("summary\n{summary}"));
+                    let _ = print_tool_preview(&name, &preview);
+                }
+                TuiUpdate::ToolError { name, error } => {
+                    if let Some(spinner) = spinner.take() {
+                        spinner.stop();
                     }
-                })
-                .await;
+                    let _ = print_tool_error(&name, &error);
+                }
+                TuiUpdate::Stats(stats) => {
+                    composer_status = stats;
+                }
+                TuiUpdate::Summary(summary) => {
+                    let _ = print_system_block(&format!("summary\n{summary}"));
+                }
+            });
+            let result = tokio::select! {
+                result = turn => result,
+                _ = &mut cancel_rx => Err(LlmError::Canceled),
+            };
+            cancel_stop.store(true, Ordering::Relaxed);
+            let _ = cancel_handle.join();
             if let Some(spinner) = spinner.take() {
                 spinner.stop();
             }
-            if let Err(error) = result {
-                let formatted = format_error(&error, self.app.debug);
-                composer_status = "last turn failed; run with --debug for details".to_string();
-                let _ = print_error_block(&formatted);
+            match result {
+                Ok(()) => {}
+                Err(LlmError::Canceled) => {
+                    composer_status = "last turn canceled".to_string();
+                    let _ = print_system_block("canceled");
+                }
+                Err(error) => {
+                    let formatted = format_error(&error, self.app.debug);
+                    composer_status = "last turn failed; run with --debug for details".to_string();
+                    let _ = print_error_block(&formatted);
+                }
             }
         }
 
@@ -275,7 +314,7 @@ impl Repl {
         }
     }
 
-    async fn handle_user_turn(&mut self, user_input: String) -> Result<(), LlmError> {
+    async fn handle_user_turn(&mut self, user_input: UserTurnInput) -> Result<(), LlmError> {
         self.handle_user_turn_with(user_input, |update| match update {
             TuiUpdate::SummaryStart => println!("[integrating previous turn...]"),
             TuiUpdate::SummaryDone => {}
@@ -304,17 +343,26 @@ impl Repl {
 
     async fn handle_user_turn_with<F>(
         &mut self,
-        user_input: String,
+        user_input: UserTurnInput,
         mut emit: F,
     ) -> Result<(), LlmError>
     where
         F: FnMut(TuiUpdate),
     {
+        let text_images = vision::attachments_from_text(&user_input.text)
+            .await
+            .map_err(|error| LlmError::Input(error.to_string()))?;
+        let mut images = user_input.images;
+        images.extend(text_images);
+        dedupe_images(&mut images);
+        images.truncate(vision::MAX_IMAGES_PER_MESSAGE);
+
         let initial_prompt = build_agent_prompt(
             &self.app.tools,
             &self.app.manifest,
             self.app.context.summary(),
-            &user_input,
+            &user_input.text,
+            &images,
         );
         let mut usage = TurnUsage::default();
 
@@ -335,12 +383,14 @@ impl Repl {
             &self.app.tools,
             &self.app.manifest,
             self.app.context.summary(),
-            &user_input,
+            &user_input.text,
+            &images,
         );
-        let would_be = self
-            .app
-            .context
-            .estimate_would_be_tokens(&prompt.system, &user_input);
+        let would_be = self.app.context.estimate_would_be_tokens(
+            &prompt.system,
+            &user_input.text,
+            images.len(),
+        );
         usage.context_tokens = prompt.estimated_tokens.tokens;
         let mut messages = prompt.messages;
         let mut assistant_text = String::new();
@@ -380,8 +430,12 @@ impl Repl {
                 .map(|choice| choice.message.clone())
                 .ok_or(LlmError::MissingChoice)?;
 
-            if let Some(content) = &message.content {
-                assistant_text.push_str(content);
+            if message.content.is_some() {
+                if let Some(text) = message.content_text() {
+                    assistant_text.push_str(text);
+                } else {
+                    assistant_text.push_str("[non-text assistant content]");
+                }
             }
 
             let tool_calls = message.tool_calls.clone().unwrap_or_default();
@@ -390,6 +444,7 @@ impl Repl {
             }
 
             messages.push(message);
+            let mut tool_images = Vec::new();
             for call in tool_calls {
                 let result = self.execute_tool_call(&call).await;
                 match &result {
@@ -402,6 +457,7 @@ impl Repl {
                             call.id.clone(),
                             truncate(&tool_result.content, 8000),
                         ));
+                        tool_images.extend(tool_result.images.clone());
                         all_tool_results.push(tool_result.clone());
                     }
                     Err(error) => {
@@ -415,10 +471,23 @@ impl Repl {
                 }
                 all_tool_calls.push(call);
             }
+            dedupe_images(&mut tool_images);
+            tool_images.truncate(vision::MAX_IMAGES_PER_MESSAGE);
+            if !tool_images.is_empty() {
+                let sources = tool_images
+                    .iter()
+                    .map(|image| image.source.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                messages.push(ChatMessage::user_with_images(
+                    format!("Attached image(s) from read_image: {sources}"),
+                    &tool_images,
+                ));
+            }
         }
 
         self.app.context.set_previous_exchange(Exchange {
-            user_input,
+            user_input: exchange_user_input(&user_input.text, images.len()),
             assistant_text,
             tool_calls: all_tool_calls,
             tool_results: all_tool_results,
@@ -464,6 +533,26 @@ impl Repl {
         self.app.model = model;
         if persist {
             let _ = ModelState::save_last_selected(&self.app.sources, &self.app.model.name);
+        }
+    }
+
+    fn remember_prompt(&mut self, input: &str) {
+        let input = input.trim();
+        if input.is_empty() || input.starts_with('/') {
+            return;
+        }
+        if self
+            .prompt_history
+            .last()
+            .is_some_and(|previous| previous == input)
+        {
+            return;
+        }
+
+        self.prompt_history.push(input.to_string());
+        const MAX_PROMPT_HISTORY: usize = 100;
+        if self.prompt_history.len() > MAX_PROMPT_HISTORY {
+            self.prompt_history.remove(0);
         }
     }
 
@@ -532,7 +621,7 @@ impl Repl {
         self.app
             .skills
             .list()
-            .map(|skill| format!("{} - {}", skill.name, skill.description))
+            .map(|skill| skill.display_line())
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -544,6 +633,16 @@ pub async fn select_model(models: &ModelRegistry) -> anyhow::Result<ModelProfile
         anyhow::bail!("no model profiles configured");
     }
 
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        let _raw = RawModeGuard::enter()?;
+        return select_model_with_arrows(&profiles)?
+            .ok_or_else(|| anyhow::anyhow!("model selection canceled"));
+    }
+
+    select_model_by_number(&profiles)
+}
+
+fn select_model_by_number(profiles: &[ModelProfile]) -> anyhow::Result<ModelProfile> {
     println!("configured models:");
     for (idx, profile) in profiles.iter().enumerate() {
         println!(
@@ -567,6 +666,110 @@ pub async fn select_model(models: &ModelRegistry) -> anyhow::Result<ModelProfile
         .ok_or_else(|| anyhow::anyhow!("invalid model selection: {selected}"))
 }
 
+fn select_model_with_arrows(profiles: &[ModelProfile]) -> anyhow::Result<Option<ModelProfile>> {
+    println!("\r\n{}", "models".cyan().bold());
+    let mut selected = 0;
+    render_model_picker(profiles, selected, false)?;
+
+    loop {
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                println!("\r");
+                return Ok(None);
+            }
+            KeyCode::Enter => {
+                println!("\r");
+                return Ok(profiles.get(selected).cloned());
+            }
+            KeyCode::Up => {
+                selected = if selected == 0 {
+                    profiles.len() - 1
+                } else {
+                    selected - 1
+                };
+                render_model_picker(profiles, selected, true)?;
+            }
+            KeyCode::Down => {
+                selected = (selected + 1) % profiles.len();
+                render_model_picker(profiles, selected, true)?;
+            }
+            KeyCode::Home => {
+                selected = 0;
+                render_model_picker(profiles, selected, true)?;
+            }
+            KeyCode::End => {
+                selected = profiles.len() - 1;
+                render_model_picker(profiles, selected, true)?;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn render_model_picker(
+    profiles: &[ModelProfile],
+    selected: usize,
+    redraw: bool,
+) -> anyhow::Result<()> {
+    let row_count = profiles.len().saturating_add(1);
+    if redraw {
+        execute!(
+            std::io::stdout(),
+            MoveUp(u16::try_from(row_count).unwrap_or(u16::MAX)),
+            MoveToColumn(0)
+        )?;
+    }
+
+    let (width, _) = size().unwrap_or((100, 24));
+    let max_chars = usize::from(width).saturating_sub(4).max(1);
+
+    for (idx, profile) in profiles.iter().enumerate() {
+        let row = truncate_display(
+            &format!(
+                "{} ({}) @ {}",
+                profile.name, profile.model, profile.base_url
+            ),
+            max_chars,
+        );
+        execute!(
+            std::io::stdout(),
+            MoveToColumn(0),
+            Clear(ClearType::CurrentLine)
+        )?;
+        if idx == selected {
+            execute!(
+                std::io::stdout(),
+                SetForegroundColor(Color::Cyan),
+                Print("> "),
+                Print(row),
+                ResetColor,
+                Print("\r\n")
+            )?;
+        } else {
+            execute!(std::io::stdout(), Print("  "), Print(row), Print("\r\n"))?;
+        }
+    }
+
+    let help = truncate_display(
+        "Use Up/Down to choose, Enter to select, Esc to cancel.",
+        max_chars,
+    );
+    execute!(
+        std::io::stdout(),
+        MoveToColumn(0),
+        Clear(ClearType::CurrentLine),
+        SetForegroundColor(Color::DarkGrey),
+        Print(help),
+        ResetColor,
+        Print("\r\n")
+    )?;
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 enum TuiUpdate {
     SummaryStart,
@@ -586,14 +789,42 @@ struct RawModeGuard;
 impl RawModeGuard {
     fn enter() -> anyhow::Result<Self> {
         enable_raw_mode()?;
+        execute!(std::io::stdout(), EnableBracketedPaste)?;
         Ok(Self)
     }
 }
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
+        let _ = execute!(std::io::stdout(), DisableBracketedPaste);
         let _ = disable_raw_mode();
     }
+}
+
+fn spawn_escape_listener(
+    stop: Arc<AtomicBool>,
+    cancel_tx: tokio::sync::oneshot::Sender<()>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut cancel_tx = Some(cancel_tx);
+        while !stop.load(Ordering::Relaxed) {
+            match event::poll(Duration::from_millis(50)) {
+                Ok(true) => {
+                    let Ok(Event::Key(key)) = event::read() else {
+                        continue;
+                    };
+                    if key.code == KeyCode::Esc {
+                        if let Some(cancel_tx) = cancel_tx.take() {
+                            let _ = cancel_tx.send(());
+                        }
+                        break;
+                    }
+                }
+                Ok(false) => {}
+                Err(_) => break,
+            }
+        }
+    })
 }
 
 struct Spinner {
@@ -692,28 +923,51 @@ fn print_spacer() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_composer_line(status: &str) -> anyhow::Result<String> {
-    let mut input = String::new();
-    let mut completion = CompletionState::default();
-    render_composer(&input, None, status)?;
+fn read_composer_line(status: &str, history: &[String]) -> anyhow::Result<UserTurnInput> {
+    let mut state = ComposerState::default();
+    render_composer(&state.input, state.images.len(), None, status)?;
 
     loop {
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        match handle_composer_key(key, &mut input, &mut completion)? {
-            ComposerAction::Continue => {
-                let hints = slash_hints(&input);
-                render_composer(&input, hints.as_deref(), status)?;
+        match event::read()? {
+            Event::Key(key) => match handle_composer_key(key, &mut state, history)? {
+                ComposerAction::Continue => {
+                    let hints = slash_hints(&state.input);
+                    render_composer(&state.input, state.images.len(), hints.as_deref(), status)?;
+                }
+                ComposerAction::Submit => {
+                    clear_composer()?;
+                    print_user_block(&state.input, state.images.len())?;
+                    return Ok(UserTurnInput {
+                        text: state.input,
+                        images: state.images,
+                    });
+                }
+                ComposerAction::Exit => {
+                    return Ok(UserTurnInput {
+                        text: "/exit".to_string(),
+                        images: Vec::new(),
+                    });
+                }
+            },
+            Event::Paste(text) => {
+                reset_history_navigation(&mut state);
+                state.input.push_str(&text);
+                state.completion.prefix.clear();
+                let hints = slash_hints(&state.input);
+                render_composer(&state.input, state.images.len(), hints.as_deref(), status)?;
             }
-            ComposerAction::Submit => {
-                clear_composer()?;
-                print_user_block(&input)?;
-                return Ok(input);
-            }
-            ComposerAction::Exit => return Ok("/exit".to_string()),
+            _ => {}
         }
     }
+}
+
+#[derive(Default)]
+struct ComposerState {
+    input: String,
+    images: Vec<ImageAttachment>,
+    completion: CompletionState,
+    history_cursor: Option<usize>,
+    history_draft: String,
 }
 
 #[derive(Default)]
@@ -730,8 +984,8 @@ enum ComposerAction {
 
 fn handle_composer_key(
     key: KeyEvent,
-    input: &mut String,
-    completion: &mut CompletionState,
+    state: &mut ComposerState,
+    history: &[String],
 ) -> anyhow::Result<ComposerAction> {
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -743,23 +997,81 @@ fn handle_composer_key(
         KeyCode::Esc => Ok(ComposerAction::Exit),
         KeyCode::Enter => Ok(ComposerAction::Submit),
         KeyCode::Backspace => {
-            input.pop();
-            completion.prefix.clear();
+            reset_history_navigation(state);
+            state.input.pop();
+            state.completion.prefix.clear();
+            Ok(ComposerAction::Continue)
+        }
+        KeyCode::Up if key.modifiers.is_empty() => {
+            history_previous(state, history);
+            Ok(ComposerAction::Continue)
+        }
+        KeyCode::Down if key.modifiers.is_empty() => {
+            history_next(state, history);
             Ok(ComposerAction::Continue)
         }
         KeyCode::Tab => {
-            autocomplete(input, completion);
+            reset_history_navigation(state);
+            autocomplete(&mut state.input, &mut state.completion);
+            Ok(ComposerAction::Continue)
+        }
+        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            reset_history_navigation(state);
+            paste_from_clipboard(state);
             Ok(ComposerAction::Continue)
         }
         KeyCode::Char(ch) => {
             if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                input.push(ch);
-                completion.prefix.clear();
+                reset_history_navigation(state);
+                state.input.push(ch);
+                state.completion.prefix.clear();
             }
             Ok(ComposerAction::Continue)
         }
         _ => Ok(ComposerAction::Continue),
     }
+}
+
+fn history_previous(state: &mut ComposerState, history: &[String]) {
+    if history.is_empty() || !state.images.is_empty() {
+        return;
+    }
+    if state.history_cursor.is_none() && state.input.starts_with('/') {
+        return;
+    }
+
+    let cursor = match state.history_cursor {
+        Some(0) => 0,
+        Some(index) => index - 1,
+        None => {
+            state.history_draft = state.input.clone();
+            history.len() - 1
+        }
+    };
+    state.history_cursor = Some(cursor);
+    state.input = history[cursor].clone();
+    state.completion.prefix.clear();
+}
+
+fn history_next(state: &mut ComposerState, history: &[String]) {
+    let Some(cursor) = state.history_cursor else {
+        return;
+    };
+
+    if cursor + 1 < history.len() {
+        let next = cursor + 1;
+        state.history_cursor = Some(next);
+        state.input = history[next].clone();
+    } else {
+        state.history_cursor = None;
+        state.input = std::mem::take(&mut state.history_draft);
+    }
+    state.completion.prefix.clear();
+}
+
+fn reset_history_navigation(state: &mut ComposerState) {
+    state.history_cursor = None;
+    state.history_draft.clear();
 }
 
 fn autocomplete(input: &mut String, completion: &mut CompletionState) {
@@ -800,7 +1112,34 @@ fn slash_hints(input: &str) -> Option<String> {
     }
 }
 
-fn render_composer(input: &str, hints: Option<&str>, status: &str) -> anyhow::Result<()> {
+fn paste_from_clipboard(state: &mut ComposerState) {
+    match vision::image_from_clipboard() {
+        Ok(Some(image)) if state.images.len() < vision::MAX_IMAGES_PER_MESSAGE => {
+            state.images.push(image);
+            state.completion.prefix.clear();
+        }
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            if let Ok(Some(text)) = vision::text_from_clipboard() {
+                state.input.push_str(&text);
+                state.completion.prefix.clear();
+            }
+        }
+        Err(_) => {
+            if let Ok(Some(text)) = vision::text_from_clipboard() {
+                state.input.push_str(&text);
+                state.completion.prefix.clear();
+            }
+        }
+    }
+}
+
+fn render_composer(
+    input: &str,
+    image_count: usize,
+    hints: Option<&str>,
+    status: &str,
+) -> anyhow::Result<()> {
     let mut stdout = std::io::stdout();
     let input_background = Color::Rgb {
         r: 28,
@@ -821,6 +1160,17 @@ fn render_composer(input: &str, hints: Option<&str>, status: &str) -> anyhow::Re
         SetForegroundColor(Color::White),
         Print(input)
     )?;
+    if image_count > 0 {
+        execute!(
+            stdout,
+            SetBackgroundColor(input_background),
+            SetForegroundColor(Color::Cyan),
+            Print(format!(
+                "  [{image_count} image{}]",
+                if image_count == 1 { "" } else { "s" }
+            ))
+        )?;
+    }
     if let Some(hints) = hints {
         execute!(
             stdout,
@@ -908,10 +1258,10 @@ fn banner_line(text: &str, width: usize) -> String {
     format!("| {:inner_width$} |", text)
 }
 
-fn print_user_block(input: &str) -> anyhow::Result<()> {
+fn print_user_block(input: &str, image_count: usize) -> anyhow::Result<()> {
     print_block_line(
         ">",
-        input,
+        &user_display_line(input, image_count),
         Color::Rgb {
             r: 23,
             g: 35,
@@ -921,6 +1271,24 @@ fn print_user_block(input: &str) -> anyhow::Result<()> {
         Color::White,
     )?;
     print_spacer()
+}
+
+fn user_display_line(input: &str, image_count: usize) -> String {
+    if image_count == 0 {
+        input.to_string()
+    } else if input.trim().is_empty() {
+        format!(
+            "[{image_count} image{} attached]",
+            if image_count == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "{}  [{} image{} attached]",
+            input,
+            image_count,
+            if image_count == 1 { "" } else { "s" }
+        )
+    }
 }
 
 fn print_assistant_prefix() -> anyhow::Result<()> {
@@ -1130,6 +1498,21 @@ fn tool_preview(result: &ToolResult) -> String {
         .join("\n")
 }
 
+fn dedupe_images(images: &mut Vec<ImageAttachment>) {
+    let mut seen = std::collections::BTreeSet::new();
+    images.retain(|image| seen.insert(image.data_url()));
+}
+
+fn exchange_user_input(text: &str, image_count: usize) -> String {
+    if image_count == 0 {
+        text.to_string()
+    } else if text.trim().is_empty() {
+        format!("[attached images: {image_count}]")
+    } else {
+        format!("{text}\n[attached images: {image_count}]")
+    }
+}
+
 fn first_non_empty_line(value: &str) -> Option<&str> {
     value.lines().find(|line| !line.trim().is_empty())
 }
@@ -1153,57 +1536,40 @@ fn select_model_inline(models: &ModelRegistry) -> anyhow::Result<Option<ModelPro
         return Ok(None);
     }
 
-    println!("\r\n{}", "models".cyan().bold());
-    for (idx, profile) in profiles.iter().enumerate() {
-        println!(
-            "{} {} {} {}",
-            format!("{}.", idx + 1).dark_grey(),
-            profile.name.as_str().cyan(),
-            profile.model.as_str().dark_grey(),
-            profile.base_url.as_str().dark_grey()
-        );
-    }
-
-    let mut selected = String::new();
-    render_model_prompt(&selected)?;
-    loop {
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        match key.code {
-            KeyCode::Esc => {
-                println!();
-                return Ok(None);
-            }
-            KeyCode::Enter => {
-                println!();
-                let selected = selected.trim().parse::<usize>().unwrap_or(1);
-                let index = selected.saturating_sub(1);
-                return Ok(profiles.get(index).cloned());
-            }
-            KeyCode::Backspace => {
-                selected.pop();
-                render_model_prompt(&selected)?;
-            }
-            KeyCode::Char(ch) if ch.is_ascii_digit() => {
-                selected.push(ch);
-                render_model_prompt(&selected)?;
-            }
-            _ => {}
-        }
-    }
+    select_model_with_arrows(&profiles)
 }
 
-fn render_model_prompt(input: &str) -> anyhow::Result<()> {
-    execute!(
-        std::io::stdout(),
-        MoveToColumn(0),
-        Clear(ClearType::CurrentLine),
-        SetForegroundColor(Color::Cyan),
-        Print("select model [1]: "),
-        ResetColor,
-        Print(input)
-    )?;
-    std::io::stdout().flush()?;
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_history_moves_backward_and_forward() {
+        let history = vec!["first prompt".to_string(), "second prompt".to_string()];
+        let mut state = ComposerState {
+            input: "draft".to_string(),
+            ..Default::default()
+        };
+
+        history_previous(&mut state, &history);
+        assert_eq!(state.input, "second prompt");
+        history_previous(&mut state, &history);
+        assert_eq!(state.input, "first prompt");
+        history_next(&mut state, &history);
+        assert_eq!(state.input, "second prompt");
+        history_next(&mut state, &history);
+        assert_eq!(state.input, "draft");
+    }
+
+    #[test]
+    fn prompt_history_does_not_replace_slash_command_input() {
+        let history = vec!["regular prompt".to_string()];
+        let mut state = ComposerState {
+            input: "/stats".to_string(),
+            ..Default::default()
+        };
+
+        history_previous(&mut state, &history);
+        assert_eq!(state.input, "/stats");
+    }
 }

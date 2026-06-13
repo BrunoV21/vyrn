@@ -1,6 +1,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use tempfile::tempdir;
 
@@ -67,6 +68,150 @@ api_key = ""
     assert!(stdout.contains("[read_file ok]"));
     assert!(stdout.contains("I read fixture.txt: hello from e2e."));
     assert!(stdout.contains("tokens sent:"));
+}
+
+#[test]
+fn repl_sends_image_paths_as_openai_image_parts() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let server_bodies = Arc::clone(&bodies);
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let body = read_http_body(&mut stream);
+        server_bodies.lock().unwrap().push(body);
+        write_sse(
+            &mut stream,
+            r#"data: {"choices":[{"delta":{"content":"I can see the image."}}]}"#,
+        );
+    });
+
+    let temp = tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".vyrn")).unwrap();
+    std::fs::write(temp.path().join("sample.png"), [137, 80, 78, 71]).unwrap();
+    std::fs::write(
+        temp.path().join(".vyrn/models.toml"),
+        format!(
+            r#"[models.vision]
+base_url = "http://{addr}/v1"
+model = "fake-vision"
+api_key = ""
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .current_dir(temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"describe sample.png\n/exit\n").unwrap();
+    }
+
+    let output = child.wait_with_output().unwrap();
+    server.join().unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = bodies.lock().unwrap().pop().unwrap();
+    assert!(request.contains(r#""type":"image_url""#), "{request}");
+    assert!(
+        request.contains("data:image/png;base64,iVBORw=="),
+        "{request}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("I can see the image."));
+}
+
+#[test]
+fn repl_sends_read_image_tool_results_as_vision_content() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let server_bodies = Arc::clone(&bodies);
+    let server = thread::spawn(move || {
+        for index in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let body = read_http_body(&mut stream);
+            server_bodies.lock().unwrap().push(body);
+            if index == 0 {
+                write_sse(
+                    &mut stream,
+                    r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_image","type":"function","function":{"name":"read_image","arguments":"{\"paths\":[\"sample.png\"]}"}}]}}]}"#,
+                );
+            } else {
+                write_sse(
+                    &mut stream,
+                    r#"data: {"choices":[{"delta":{"content":"The image tool result was visible."}}]}"#,
+                );
+            }
+        }
+    });
+
+    let temp = tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".vyrn")).unwrap();
+    std::fs::write(temp.path().join("sample.png"), [137, 80, 78, 71]).unwrap();
+    std::fs::write(
+        temp.path().join(".vyrn/models.toml"),
+        format!(
+            r#"[models.vision]
+base_url = "http://{addr}/v1"
+model = "fake-vision"
+api_key = ""
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .current_dir(temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"inspect sample.png\n/exit\n").unwrap();
+    }
+
+    let output = child.wait_with_output().unwrap();
+    server.join().unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = bodies.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0].contains(r#""name":"read_image""#),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[1].contains("data:image/png;base64,iVBORw=="),
+        "{}",
+        requests[1]
+    );
+    assert!(
+        requests[1].contains("Attached image(s) from read_image"),
+        "{}",
+        requests[1]
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("The image tool result was visible."));
 }
 
 fn read_http_body(stream: &mut TcpStream) -> String {

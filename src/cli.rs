@@ -5,7 +5,7 @@ use clap::Parser;
 #[command(about = "Token-efficient CLI agent for OpenAI-compatible local and small LLMs.")]
 pub struct Cli {
     /// Select a configured model profile before starting the session.
-    #[arg(long)]
+    #[arg(long, alias = "model")]
     pub models: bool,
 
     /// Override context budget for this session.
