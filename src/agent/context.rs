@@ -1,5 +1,5 @@
 use crate::agent::prompt::build_summary_refresh_messages;
-use crate::agent::tokens::{estimate_messages_tokens, estimate_text_tokens};
+use crate::agent::tokens::{TokenBreakdown, estimate_messages_breakdown, estimate_text_tokens};
 use crate::agent::transcript::Exchange;
 use crate::config::SummaryAggressiveness;
 use crate::llm::{ChatCompletionRequest, LlmError, OpenAiClient};
@@ -60,7 +60,7 @@ impl ContextManager {
         &mut self,
         client: &OpenAiClient,
         estimated_next_prompt_tokens: usize,
-    ) -> Result<Option<usize>, LlmError> {
+    ) -> Result<Option<SummaryRefreshUsage>, LlmError> {
         let Some(exchange) = &self.previous_exchange else {
             return Ok(None);
         };
@@ -73,7 +73,8 @@ impl ContextManager {
             exchange,
             include_tool_results,
         );
-        let sent = estimate_messages_tokens(&messages);
+        let breakdown = estimate_messages_breakdown(&messages);
+        let sent = breakdown.total();
         let response = client
             .complete_chat(ChatCompletionRequest {
                 model: String::new(),
@@ -89,12 +90,13 @@ impl ContextManager {
             .and_then(|choice| choice.message.content_text().map(str::to_string))
             .unwrap_or_default();
         self.summary = Some(summary.trim().to_string());
-        Ok(Some(
-            response
+        Ok(Some(SummaryRefreshUsage {
+            sent: response
                 .usage
                 .map(|usage| usage.prompt_tokens)
                 .unwrap_or(sent),
-        ))
+            breakdown,
+        }))
     }
 
     pub fn estimate_would_be_tokens(
@@ -113,4 +115,10 @@ impl ContextManager {
         }
         total
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SummaryRefreshUsage {
+    pub sent: usize,
+    pub breakdown: TokenBreakdown,
 }
