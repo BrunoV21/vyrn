@@ -71,6 +71,137 @@ api_key = ""
 }
 
 #[test]
+fn stats_command_prints_token_contributors() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _body = read_http_body(&mut stream);
+        write_sse(
+            &mut stream,
+            r#"data: {"choices":[{"delta":{"content":"Done."}}]}"#,
+        );
+    });
+
+    let temp = tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".vyrn")).unwrap();
+    std::fs::write(
+        temp.path().join(".vyrn/models.toml"),
+        format!(
+            r#"[models.llama3]
+base_url = "http://{addr}/v1"
+model = "fake-small"
+api_key = ""
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .current_dir(temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"say done\n/stats\n/exit\n").unwrap();
+    }
+
+    let output = child.wait_with_output().unwrap();
+    server.join().unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("contributors:"), "{stdout}");
+    assert!(stdout.contains("tools:"), "{stdout}");
+    assert!(stdout.contains("user requests:"), "{stdout}");
+}
+
+#[test]
+fn repl_compacts_tool_history_and_continues_past_eight_rounds() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let server_bodies = Arc::clone(&bodies);
+    let server = thread::spawn(move || {
+        for index in 0..11 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let body = read_http_body(&mut stream);
+            server_bodies.lock().unwrap().push(body);
+            if index < 10 {
+                write_sse(
+                    &mut stream,
+                    &format!(
+                        r#"data: {{"choices":[{{"delta":{{"tool_calls":[{{"index":0,"id":"call_read_{index}","type":"function","function":{{"name":"read_file","arguments":"{{\"path\":\"fixture.txt\"}}"}}}}]}}}}]}}"#
+                    ),
+                );
+            } else {
+                write_sse(
+                    &mut stream,
+                    r#"data: {"choices":[{"delta":{"content":"Finished after many tools."}}]}"#,
+                );
+            }
+        }
+    });
+
+    let temp = tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".vyrn")).unwrap();
+    std::fs::write(temp.path().join("fixture.txt"), "x".repeat(4000)).unwrap();
+    std::fs::write(
+        temp.path().join(".vyrn/models.toml"),
+        format!(
+            r#"[models.llama3]
+base_url = "http://{addr}/v1"
+model = "fake-small"
+api_key = ""
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("--context")
+        .arg("1200")
+        .current_dir(temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"inspect repeatedly\n/exit\n").unwrap();
+    }
+
+    let output = child.wait_with_output().unwrap();
+    server.join().unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Finished after many tools."), "{stdout}");
+    let requests = bodies.lock().unwrap();
+    assert_eq!(requests.len(), 11);
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.contains("[compacted tool history]")),
+        "{requests:#?}"
+    );
+}
+
+#[test]
 fn repl_sends_image_paths_as_openai_image_parts() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
