@@ -183,7 +183,7 @@ Execute one or more shell commands in sequence on the host machine. Raw passthro
 
 Returns stdout and stderr per command. If a command fails, subsequent commands still run unless the model chooses to stop.
 
-The `batch` tool is the primary extensibility primitive. Anything not in the core tools — downloading, installing, running scripts, interacting with browsers, system calls — goes through `batch`.
+The `batch` tool is the primary extensibility primitive. Anything not in the core tools — downloading, installing, running scripts, interacting with browsers, system calls — goes through `batch`. Commands run from the current working directory by default unless the command explicitly changes directories or uses an absolute path.
 
 ### 7.5 `refresh_manifest`
 Rescan the host machine for available tools and reinject a compact manifest into the system prompt. Replaces the previous manifest — does not append. The agent calls this when it suspects the environment has changed (e.g. after installing a new tool via `batch`).
@@ -197,16 +197,19 @@ On startup, vyrn performs a fast scan of the host environment and produces a com
 **What it checks:**
 - Common binaries in PATH (git, curl, wget, python3, node, cargo, docker, chrome, ffmpeg, etc.)
 - Active MCP servers (from `.mcp.json`)
-- Available skills (names + descriptions only, from `.agents/skills/` and `.vyrn/skills/`)
+- Available skills from `.agents/skills/`, project `.vyrn/skills/`, and `~/.vyrn/skills/`
 
 **Example manifest injection:**
 ```
 [env] git, curl, node, python3, chrome, docker
 [skills] pdf-export, code-review, deploy-check
 [mcp] filesystem(eager), postgres(lazy)
+[available_skills]
+- code-review | project .vyrn | .vyrn/skills/code-review/SKILL.md | Review code changes.
 ```
 
 The manifest is fast because it only checks binary availability (`which`), not versions or configurations. Full rescanning is triggered by `refresh_manifest`.
+The compact `[skills]` manifest line stays name-only; the adjacent `[available_skills]` system prompt section includes source, path, and description so the agent can decide which skill file to load.
 
 ---
 
@@ -319,6 +322,8 @@ This is tracked per-request and accumulated as a session total.
 ### 11.1 Interactive REPL
 
 vyrn runs as an interactive terminal session. The user enters requests, the agent responds, executes tools, and streams output — all within a single persistent session.
+While a request is running, `Esc` cancels the active turn and returns to the
+composer. In the composer, Up/Down recalls previous non-command prompts.
 
 ```
 vyrn
@@ -355,14 +360,16 @@ This is a permanent fixture in the UI — not hidden, not optional. It is a core
 vyrn --models
 ```
 
-Lists all configured model profiles from `models.toml` and prompts the user to select one for the session. Can also be invoked mid-session via a `/model` command.
+Lists all configured model profiles from `models.toml` and lets the user select
+one with Up/Down and Enter. `--model` is accepted as an alias. Can also be
+invoked mid-session via a `/model` command.
 
 ### 11.5 CLI Commands
 
 | Command | Description |
 |---|---|
 | `vyrn` | Start interactive session with default model |
-| `vyrn --models` | Select model before starting |
+| `vyrn --models` | Select model before starting; `--model` is an alias |
 | `vyrn --context 2048` | Override context budget for this session |
 | `vyrn --verbose` | Show full token counts and raw summaries |
 
@@ -374,7 +381,7 @@ Lists all configured model profiles from `models.toml` and prompts the user to s
 | `/stats` | Show full token usage for the session |
 | `/manifest` | Print current machine manifest |
 | `/refresh` | Trigger `refresh_manifest` manually |
-| `/skills` | List loaded skills |
+| `/skills` | List discovered skill sources and paths |
 | `/clear` | Reset session summary and history |
 | `/exit` | Exit vyrn |
 

@@ -32,7 +32,8 @@ flowchart TD
 - Line-oriented interactive REPL.
 - Native-scrollback terminal UI for TTY sessions, with slash autocomplete and plain-text fallback for pipes.
 - OpenAI-compatible streaming chat completions client.
-- Core tools: `read_file`, `write_file`, `edit_file`, `batch`, `refresh_manifest`.
+- Core tools: `read_file`, `read_image`, `write_file`, `edit_file`, `batch`, `refresh_manifest`.
+- Template-based prompt assembly for agent and summary prompts.
 - Rolling summary context manager and token savings ledger.
 - Agent Skills discovery by name and description.
 - `.mcp.json` metadata parsing and merge precedence.

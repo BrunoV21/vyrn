@@ -14,8 +14,10 @@ Discovery paths, in priority order:
 
 Global config can also live under `~/.vyrn/`.
 
-At startup, vyrn loads only skill names and descriptions into the compact manifest.
-Full `SKILL.md` activation is part of the progressive-disclosure workflow.
+At startup, vyrn keeps skill names in the compact manifest and adds an
+`[available_skills]` system prompt section with each skill's source,
+`SKILL.md` path, and description. Full `SKILL.md` activation remains part of the
+progressive-disclosure workflow.
 
 ## Skill format
 

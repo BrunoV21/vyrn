@@ -7,7 +7,7 @@ vyrn has a deliberately small command surface. The primary interface is the inte
 | Command | Description |
 |---|---|
 | `vyrn` | Start an interactive session with the default model. |
-| `vyrn --models` | Select a configured model profile before starting. |
+| `vyrn --models` | Select a configured model profile before starting. `--model` is an alias. |
 | `vyrn --context 2048` | Override the context budget for this session. |
 | `vyrn --verbose` | Show full token counts and raw summary information. |
 | `vyrn --debug` | Show provider URLs, network details, and response bodies on errors. |
@@ -28,7 +28,7 @@ Slash commands operate inside an active `vyrn` session.
 | `/stats` | Show full token usage for the session. |
 | `/manifest` | Print the current machine manifest. |
 | `/refresh` | Trigger `refresh_manifest` manually. |
-| `/skills` | List discovered skills. |
+| `/skills` | List discovered skills with source and `SKILL.md` path. |
 | `/clear` | Reset session summary/history and clear the terminal UI. |
 | `/exit` | Exit vyrn. |
 

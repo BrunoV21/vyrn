@@ -231,19 +231,23 @@ The system prompt has four compact sections:
 
 ```text
 [role] terminal coding agent. conserve tokens.
-[rules] use tools when needed. prefer batch for shell. summarize aggressively.
-[tools] read_file, write_file, edit_file, batch, refresh_manifest
-[env] git,curl,node,python3 | skills:code-review | mcp:filesystem(eager)
+[rules] use tools when needed. use read_image for image files. prefer batch for shell. keep outputs compact.
+[tools] {{tools}}
+{{manifest}}
+{{available_skills}}
 ```
 
-Implementation should generate prompt text from structured inputs instead of storing
-one large handwritten prompt. This keeps token-cost reviews straightforward.
+Implementation should keep the static prompt shape in named templates and render
+dynamic slots from structured inputs such as tool descriptors and the compact
+machine manifest. This keeps token-cost reviews straightforward and makes the
+rendered prompt observable in tests.
 
 Prompt assembly inputs:
 
 - static base instructions
 - compact tool descriptors
 - current machine manifest
+- available skill summaries with source and `SKILL.md` path
 - activated skill instructions, if any
 - eager MCP tool descriptors, phase 2
 - rolling summary
@@ -471,6 +475,11 @@ Do not run version commands during startup. Manifest rendering should target rou
 [mcp] filesystem(eager),postgres(lazy)
 ```
 
+The agent system prompt adds a separate `[available_skills]` section after the
+manifest with each skill's name, source, `SKILL.md` path, and description. This
+keeps `/manifest` compact while making skill activation paths visible to the
+model.
+
 `refresh_manifest` replaces the current manifest in memory. It must not append another
 manifest section to the prompt.
 
@@ -562,7 +571,7 @@ Slash commands are handled locally and never sent to the model:
 | `/stats` | Render `TokenLedger`. |
 | `/manifest` | Print current manifest. |
 | `/refresh` | Rescan manifest. |
-| `/skills` | List discovered and activated skills. |
+| `/skills` | List discovered skills with source and `SKILL.md` path. |
 | `/clear` | Reset summary, previous exchange, and turn ledger. |
 | `/exit` | End REPL. |
 

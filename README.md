@@ -78,6 +78,9 @@ Start an interactive session:
 cargo run -- --models
 ```
 
+Use Up/Down and Enter to choose a configured model profile. `--model` is accepted
+as an alias.
+
 Expected session shape:
 
 ```text
@@ -100,6 +103,15 @@ and the current prompt footprint against the configured context window:
 ```text
 tokens sent: 225 | saved: 29 | session saved: 18 | context: 342/4,096
 ```
+
+Press `Esc` while a turn is running to cancel it and return to the composer. Press
+Up/Down in the composer to recall previous non-command prompts.
+
+Vision-capable models can receive images as part of the current message. In the TTY
+composer, press `Ctrl+V` with an image on the clipboard to attach it. You can also paste
+or type image paths such as `./screen.png` or `~/Pictures/mock.jpg`; `png`, `jpg`,
+`jpeg`, `webp`, and `gif` files are encoded as base64 data URLs in the OpenAI request.
+Multiple images can be attached to one message.
 
 Inside a session, local control commands are handled by vyrn:
 
@@ -164,7 +176,7 @@ The docs use a terminal-brutalist standard: black surfaces, violet brand/action 
 
 - Rust CLI package with a styled native-scrollback TTY interface and a plain-text fallback for pipes.
 - OpenAI-compatible streaming chat completions client.
-- Core tools: `read_file`, `write_file`, `edit_file`, `batch`, `refresh_manifest`.
+- Core tools: `read_file`, `read_image`, `write_file`, `edit_file`, `batch`, `refresh_manifest`.
 - Compact machine manifest for binaries, skills, and MCP server metadata.
 - Config/model loading from `.vyrn/` and `~/.vyrn/`, with global vyrn config overriding local settings.
 - Rolling summary context manager and visible token savings ledger.

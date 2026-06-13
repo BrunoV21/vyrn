@@ -18,6 +18,10 @@ In a real terminal, `vyrn` starts a styled native-scrollback chat UI with raw-mo
 keyboard input. It keeps normal terminal scrollback, streams model output live, supports
 Tab completion for slash commands, and provides inline `/models` selection. When stdin
 or stdout is not a TTY, it falls back to the plain text prompt for scripts and tests.
+Vision-capable models can receive images in the current message through `Ctrl+V`
+clipboard image paste or by mentioning image file paths in the prompt.
+While a turn is running, press `Esc` to cancel it and return to the composer. In
+the composer, press Up/Down to recall previous non-command prompts.
 
 The startup UI shows the boxed `vyrn` banner, selected model, and context budget.
 If no model is selected at startup, vyrn uses the last selected model, then the
@@ -25,7 +29,8 @@ configured default, then the first configured model.
 
 ## `vyrn --models`
 
-Lists configured model profiles from `models.toml` and prompts the user to select one for the session.
+Lists configured model profiles from `models.toml` and lets the user pick one with
+Up/Down and Enter. `--model` is accepted as an alias.
 
 ```bash
 vyrn --models

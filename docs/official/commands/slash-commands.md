@@ -6,7 +6,8 @@ In a real terminal, type `/` and press `Tab` to autocomplete slash commands.
 
 ## `/models`
 
-Switch the active model profile without leaving the session.
+Switch the active model profile without leaving the session. Use Up/Down and
+Enter to choose a configured profile.
 
 ```text
 /models
@@ -49,13 +50,14 @@ Use this after installing tools or changing project skill/MCP configuration.
 
 ## `/skills`
 
-List discovered skills.
+List discovered skills with their source and `SKILL.md` path.
 
 ```text
 /skills
 ```
 
-Only skill names and descriptions should be shown until a skill is activated.
+Use this to see whether a skill came from project `.vyrn`, global `~/.vyrn`, or
+project `.agents`, and which file the agent can read when activating it.
 
 ## `/clear`
 
