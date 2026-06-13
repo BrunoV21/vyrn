@@ -18,15 +18,20 @@ is kept as an alias.
 
 ## `/stats`
 
-Print full token usage for the current session.
+Print full token usage for the current session, including the largest estimated
+prompt contributors.
 
 ```text
 /stats
 ```
 
-The compact status row still updates after each completed request.
+The compact status row still updates after each completed request. `/stats` adds a
+ranked contributor list for system prompt text, summaries, user requests, images,
+tool schemas, tool call input, tool call output, assistant context, and message
+overhead.
 
-In verbose mode, `/stats` also includes per-call accounting for each turn.
+In verbose mode, `/stats` also includes per-call accounting and per-call
+contributors for each turn.
 
 ## `/manifest`
 
