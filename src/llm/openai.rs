@@ -25,6 +25,8 @@ pub enum LlmError {
     Input(String),
     #[error("model response did not include a choice")]
     MissingChoice,
+    #[error("safety tool round limit reached after {rounds}; ask a narrower request or continue")]
+    ToolRoundLimit { rounds: usize },
     #[error("turn canceled")]
     Canceled,
 }
