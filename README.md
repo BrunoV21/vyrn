@@ -26,8 +26,8 @@ The interactive interface uses native terminal scrollback with `crossterm` raw-m
                             OpenAI-compatible chat API
                                             │
                                      ┌──────▼───────┐
-                                     │ local/small   │
-                                     │ LLM endpoint  │
+                                     │ local/small  │
+                                     │ LLM endpoint │
                                      └──────────────┘
 ```
 
