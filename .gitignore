@@ -6,3 +6,8 @@ docs/official/.vitepress/dist/
 
 .DS_Store
 *.log
+
+.ferrisgrid/
+.vyrn/config.toml
+.vyrn/models.toml
+.vyrn/state.toml
