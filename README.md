@@ -12,6 +12,8 @@
   </p>
 </div>
 
+Most agent tools assume they can spend 128K+ context windows and still feel fast. For local or small OpenAI-compatible models running on constrained hardware, that is often the wrong default: large always-loaded prompts increase memory pressure, slow turns down, and waste tokens before useful work starts.
+
 vyrn is a token-efficient, model-agnostic CLI agent built in Rust for developers and terminal-native users running local or small LLMs. It keeps the always-loaded prompt and tool surface tiny, uses raw shell batching as the main power primitive, and tracks token savings as a first-class product signal.
 
 The interactive interface uses native terminal scrollback with `crossterm` raw-mode input. Real terminals get styled prompts, live streaming output, slash-command autocomplete, inline `/models` selection, running indicators, compact tool previews, and a composer status row; piped or scripted runs fall back to plain text.

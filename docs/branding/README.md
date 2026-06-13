@@ -1,10 +1,10 @@
 # vyrn Brand Story
 
-vyrn starts from one constraint: most CLI agents assume they can spend thousands of tokens before the user even asks for work. That is comfortable for large hosted models, but wasteful for local and small LLMs.
+vyrn starts from one constraint: most CLI agents assume they can spend thousands of tokens before the user even asks for work, and many now assume 128K+ context windows are a practical default. That is comfortable for large hosted models, but often the wrong fit for local and small LLMs running on constrained hardware.
 
 vyrn chooses the opposite default.
 
-It treats context like memory on a small machine: precious, visible, and worth managing carefully. The agent starts with a tiny prompt, a compact machine manifest, a minimal tool surface, and a rolling summary that keeps only what matters.
+It treats context like memory on a small machine: precious, visible, and worth managing carefully. Large always-loaded prompts increase memory pressure, slow turns down, and waste tokens before useful work starts. The agent starts with a tiny prompt, a compact machine manifest, a minimal tool surface, and a rolling summary that keeps only what matters.
 
 The name **vyrn** is short, terminal-friendly, and intentionally lightweight. It should feel like a small binary that does a serious job without dragging a large runtime, hosted service, or proprietary stack behind it.
 
