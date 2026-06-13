@@ -1,5 +1,5 @@
 use crate::agent::prompt::build_agent_prompt;
-use crate::agent::tokens::{TurnUsage, estimate_messages_tokens};
+use crate::agent::tokens::{TokenBreakdown, TurnUsage, estimate_chat_request_breakdown};
 use crate::agent::transcript::{Exchange, truncate};
 use crate::app::App;
 use crate::config::{ModelProfile, ModelRegistry, ModelState};
@@ -34,6 +34,10 @@ const SLASH_COMMANDS: &[&str] = &[
     "/clear",
     "/exit",
 ];
+const MAX_TOOL_ROUNDS: usize = 64;
+const TOOL_CONTEXT_COMPACTION_PERCENT: usize = 70;
+const TOOL_ROUNDS_TO_KEEP: usize = 2;
+const COMPACTED_TOOL_HISTORY_PREFIX: &str = "[compacted tool history]";
 
 pub struct Repl {
     app: App,
@@ -369,13 +373,18 @@ impl Repl {
         if self.app.context.previous_exchange().is_some() {
             emit(TuiUpdate::SummaryStart);
         }
-        if let Some(summary_sent) = self
+        if let Some(summary_usage) = self
             .app
             .context
             .refresh_summary(&self.app.client, initial_prompt.estimated_tokens.tokens)
             .await?
         {
-            usage.add_call("summary", summary_sent, summary_sent);
+            usage.add_call_with_breakdown(
+                "summary",
+                summary_usage.sent,
+                summary_usage.sent,
+                summary_usage.breakdown,
+            );
         }
         emit(TuiUpdate::SummaryDone);
 
@@ -396,10 +405,18 @@ impl Repl {
         let mut assistant_text = String::new();
         let mut all_tool_calls = Vec::new();
         let mut all_tool_results = Vec::new();
+        let mut hit_tool_round_limit = false;
 
-        for round in 0..8 {
-            let sent = estimate_messages_tokens(&messages);
-            usage.add_call(format!("agent-{round}"), sent, would_be);
+        for round in 0..MAX_TOOL_ROUNDS {
+            let tool_schemas = self.app.tools.schemas();
+            let request_breakdown = estimate_chat_request_breakdown(&messages, &tool_schemas);
+            let sent = request_breakdown.total();
+            usage.add_call_with_breakdown(
+                format!("agent-{round}"),
+                sent,
+                would_be + request_breakdown.tool_schemas,
+                request_breakdown,
+            );
 
             emit(TuiUpdate::AssistantStart);
             let response = self
@@ -409,7 +426,7 @@ impl Repl {
                     ChatCompletionRequest {
                         model: String::new(),
                         messages: messages.clone(),
-                        tools: self.app.tools.schemas(),
+                        tools: tool_schemas.clone(),
                         tool_choice: None,
                         stream: true,
                     },
@@ -484,6 +501,14 @@ impl Repl {
                     &tool_images,
                 ));
             }
+            compact_tool_history_if_needed(
+                &mut messages,
+                &tool_schemas,
+                self.app.config.context.max_tokens,
+            );
+            if round + 1 == MAX_TOOL_ROUNDS {
+                hit_tool_round_limit = true;
+            }
         }
 
         self.app.context.set_previous_exchange(Exchange {
@@ -492,7 +517,14 @@ impl Repl {
             tool_calls: all_tool_calls,
             tool_results: all_tool_results,
         });
+        usage.context_tokens =
+            estimate_chat_request_breakdown(&messages, &self.app.tools.schemas()).total();
         self.app.stats.push_turn(usage);
+        if hit_tool_round_limit {
+            return Err(LlmError::ToolRoundLimit {
+                rounds: MAX_TOOL_ROUNDS,
+            });
+        }
         emit(TuiUpdate::Stats(self.compact_stats_line()));
         if self.app.verbose
             && let Some(summary) = self.app.context.summary()
@@ -572,6 +604,14 @@ impl Repl {
             current_context,
             self.app.config.context.max_tokens,
         );
+        if self.app.stats.session_sent > 0 {
+            text.push_str("\ncontributors:");
+            text.push_str(&format_breakdown(
+                &self.session_breakdown(),
+                self.app.stats.session_sent,
+                8,
+            ));
+        }
         if self.app.verbose {
             for (idx, turn) in self.app.stats.turns.iter().enumerate() {
                 text.push_str(&format!(
@@ -586,10 +626,19 @@ impl Repl {
                         "\n  {} sent={} would_be={}",
                         call.label, call.sent, call.would_be
                     ));
+                    text.push_str(&format_breakdown(&call.breakdown, call.sent, 4));
                 }
             }
         }
         text
+    }
+
+    fn session_breakdown(&self) -> TokenBreakdown {
+        let mut breakdown = TokenBreakdown::default();
+        for turn in &self.app.stats.turns {
+            breakdown.add(turn.breakdown);
+        }
+        breakdown
     }
 
     fn compact_stats_line(&self) -> String {
@@ -625,6 +674,193 @@ impl Repl {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+fn format_breakdown(breakdown: &TokenBreakdown, total: usize, limit: usize) -> String {
+    let mut text = String::new();
+    for item in breakdown.items().into_iter().take(limit) {
+        let pct = if total == 0 {
+            0
+        } else {
+            item.tokens.saturating_mul(100) / total
+        };
+        text.push_str(&format!(
+            "\n  {}: {} ({}%)",
+            item.label,
+            crate::tui::render::format_number(item.tokens as isize),
+            pct
+        ));
+    }
+    text
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MessageRange {
+    start: usize,
+    end: usize,
+}
+
+fn compact_tool_history_if_needed(
+    messages: &mut Vec<ChatMessage>,
+    tools: &[Value],
+    max_tokens: usize,
+) -> bool {
+    let threshold = tool_context_compaction_threshold(max_tokens);
+    if estimate_chat_request_breakdown(messages, tools).total() < threshold {
+        return false;
+    }
+    compact_tool_history(messages)
+}
+
+fn tool_context_compaction_threshold(max_tokens: usize) -> usize {
+    max_tokens
+        .saturating_mul(TOOL_CONTEXT_COMPACTION_PERCENT)
+        .div_ceil(100)
+        .max(1)
+}
+
+fn compact_tool_history(messages: &mut Vec<ChatMessage>) -> bool {
+    let existing_history = compacted_tool_history(messages);
+    let retained = messages
+        .iter()
+        .filter(|message| !is_compacted_tool_history_message(message))
+        .cloned()
+        .collect::<Vec<_>>();
+    let rounds = completed_tool_rounds(&retained);
+    if rounds.len() <= TOOL_ROUNDS_TO_KEEP {
+        return false;
+    }
+
+    let compact_count = rounds.len() - TOOL_ROUNDS_TO_KEEP;
+    let compacted_rounds = &rounds[..compact_count];
+    let mut lines = Vec::new();
+    if let Some(existing_history) = existing_history.filter(|history| !history.trim().is_empty()) {
+        lines.push(existing_history);
+    }
+    for (idx, range) in compacted_rounds.iter().enumerate() {
+        lines.push(compact_tool_round(&retained, *range, idx + 1));
+    }
+
+    let compacted_message = ChatMessage::system(format!(
+        "{COMPACTED_TOOL_HISTORY_PREFIX}\n{}",
+        truncate(&lines.join("\n"), 6000)
+    ));
+
+    let mut next = Vec::new();
+    let mut inserted = false;
+    let mut index = 0;
+    while index < retained.len() {
+        if let Some(range) = compacted_rounds.iter().find(|range| range.start == index) {
+            if !inserted {
+                next.push(compacted_message.clone());
+                inserted = true;
+            }
+            index = range.end;
+        } else {
+            next.push(retained[index].clone());
+            index += 1;
+        }
+    }
+
+    *messages = next;
+    true
+}
+
+fn compacted_tool_history(messages: &[ChatMessage]) -> Option<String> {
+    let mut histories = messages
+        .iter()
+        .filter(|message| is_compacted_tool_history_message(message))
+        .filter_map(ChatMessage::content_text)
+        .map(|content| {
+            content
+                .strip_prefix(COMPACTED_TOOL_HISTORY_PREFIX)
+                .unwrap_or(content)
+                .trim()
+                .to_string()
+        })
+        .filter(|content| !content.is_empty())
+        .collect::<Vec<_>>();
+    if histories.is_empty() {
+        None
+    } else {
+        Some(histories.drain(..).collect::<Vec<_>>().join("\n"))
+    }
+}
+
+fn is_compacted_tool_history_message(message: &ChatMessage) -> bool {
+    message.role == "system"
+        && message
+            .content_text()
+            .is_some_and(|content| content.starts_with(COMPACTED_TOOL_HISTORY_PREFIX))
+}
+
+fn completed_tool_rounds(messages: &[ChatMessage]) -> Vec<MessageRange> {
+    let mut ranges = Vec::new();
+    let mut index = 0;
+    while index < messages.len() {
+        let message = &messages[index];
+        let Some(tool_calls) = &message.tool_calls else {
+            index += 1;
+            continue;
+        };
+        if message.role != "assistant" || tool_calls.is_empty() {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        index += 1;
+        let first_result = index;
+        while index < messages.len() && messages[index].role == "tool" {
+            index += 1;
+        }
+        if index < messages.len() && is_tool_image_attachment_message(&messages[index]) {
+            index += 1;
+        }
+        if index > first_result {
+            ranges.push(MessageRange { start, end: index });
+        }
+    }
+    ranges
+}
+
+fn is_tool_image_attachment_message(message: &ChatMessage) -> bool {
+    message.role == "user"
+        && message
+            .content_text()
+            .is_some_and(|content| content.starts_with("Attached image(s) from read_image:"))
+}
+
+fn compact_tool_round(
+    messages: &[ChatMessage],
+    range: MessageRange,
+    round_number: usize,
+) -> String {
+    let mut tools = Vec::new();
+    let mut results = Vec::new();
+    for message in &messages[range.start..range.end] {
+        if let Some(tool_calls) = &message.tool_calls {
+            for call in tool_calls {
+                tools.push(format!(
+                    "{}({})",
+                    call.function.name,
+                    truncate(&call.function.arguments, 160)
+                ));
+            }
+        } else if message.role == "tool" {
+            let result = message.content_text().unwrap_or_default();
+            results.push(truncate(result, 320).replace('\n', " "));
+        } else if is_tool_image_attachment_message(message) {
+            results.push(message.content_text().unwrap_or_default().to_string());
+        }
+    }
+
+    let mut line = format!("- round {round_number}: tools={}", tools.join(", "));
+    if !results.is_empty() {
+        line.push_str("; results=");
+        line.push_str(&results.join(" | "));
+    }
+    truncate(&line, 900)
 }
 
 pub async fn select_model(models: &ModelRegistry) -> anyhow::Result<ModelProfile> {
@@ -1571,5 +1807,54 @@ mod tests {
 
         history_previous(&mut state, &history);
         assert_eq!(state.input, "/stats");
+    }
+
+    #[test]
+    fn tool_history_compaction_keeps_recent_rounds() {
+        let mut messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("inspect files"),
+        ];
+        for index in 0..4 {
+            messages.push(tool_call_message(index));
+            messages.push(ChatMessage::tool(
+                format!("call_{index}"),
+                format!("large output from round {index}"),
+            ));
+        }
+
+        assert!(compact_tool_history(&mut messages));
+
+        let compacted = messages
+            .iter()
+            .filter_map(ChatMessage::content_text)
+            .find(|content| content.starts_with(COMPACTED_TOOL_HISTORY_PREFIX))
+            .unwrap();
+        assert!(compacted.contains("round 1"));
+        assert!(compacted.contains("large output from round 0"));
+        assert!(compacted.contains("large output from round 1"));
+        assert!(!compacted.contains("large output from round 2"));
+        assert!(!compacted.contains("large output from round 3"));
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.role == "assistant" && message.tool_calls.is_some())
+                .count(),
+            TOOL_ROUNDS_TO_KEEP
+        );
+    }
+
+    fn tool_call_message(index: usize) -> ChatMessage {
+        ChatMessage::assistant_tool_calls(
+            String::new(),
+            vec![ToolCall {
+                id: format!("call_{index}"),
+                kind: "function".to_string(),
+                function: crate::llm::types::ToolCallFunction {
+                    name: "read_file".to_string(),
+                    arguments: format!(r#"{{"path":"fixture_{index}.txt"}}"#),
+                },
+            }],
+        )
     }
 }
