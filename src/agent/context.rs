@@ -1,5 +1,5 @@
 use crate::agent::prompt::build_summary_refresh_messages;
-use crate::agent::tokens::{TokenBreakdown, estimate_messages_breakdown, estimate_text_tokens};
+use crate::agent::tokens::{estimate_messages_breakdown, estimate_text_tokens};
 use crate::agent::transcript::Exchange;
 use crate::config::SummaryAggressiveness;
 use crate::llm::{ChatCompletionRequest, LlmError, OpenAiClient};
@@ -81,8 +81,8 @@ impl ContextManager {
             exchange,
             include_tool_results,
         );
-        let breakdown = estimate_messages_breakdown(&messages);
-        let sent = breakdown.total();
+        let input_breakdown = estimate_messages_breakdown(&messages);
+        let input_tokens = input_breakdown.total();
         let response = client
             .complete_chat(ChatCompletionRequest {
                 model: String::new(),
@@ -97,19 +97,30 @@ impl ContextManager {
             .first()
             .and_then(|choice| choice.message.content_text().map(str::to_string))
             .unwrap_or_default();
+        let estimated_output_tokens = if summary.trim().is_empty() {
+            0
+        } else {
+            estimate_text_tokens(&summary)
+        };
+        let usage = response.usage;
+        let input_tokens = usage
+            .map(|usage| usage.prompt_tokens)
+            .filter(|tokens| *tokens > 0)
+            .unwrap_or(input_tokens);
+        let output_tokens = usage
+            .map(|usage| usage.completion_tokens)
+            .filter(|tokens| *tokens > 0)
+            .unwrap_or(estimated_output_tokens);
         self.summary = Some(summary.trim().to_string());
         Ok(Some(SummaryRefreshUsage {
-            sent: response
-                .usage
-                .map(|usage| usage.prompt_tokens)
-                .unwrap_or(sent),
-            breakdown,
+            input_tokens,
+            output_tokens,
         }))
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SummaryRefreshUsage {
-    pub sent: usize,
-    pub breakdown: TokenBreakdown,
+    pub input_tokens: usize,
+    pub output_tokens: usize,
 }

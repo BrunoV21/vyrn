@@ -37,6 +37,8 @@ pub struct CallUsage {
 pub struct TokenBreakdown {
     pub system_prompt: usize,
     pub summaries: usize,
+    pub summary_inputs: usize,
+    pub summary_outputs: usize,
     pub user_requests: usize,
     pub images: usize,
     pub skills: usize,
@@ -44,6 +46,7 @@ pub struct TokenBreakdown {
     pub tool_call_inputs: usize,
     pub tool_call_outputs: usize,
     pub assistant_context: usize,
+    pub assistant_outputs: usize,
     pub overhead: usize,
     pub other: usize,
 }
@@ -100,6 +103,8 @@ impl TokenBreakdown {
     pub fn total(&self) -> usize {
         self.system_prompt
             + self.summaries
+            + self.summary_inputs
+            + self.summary_outputs
             + self.user_requests
             + self.images
             + self.skills
@@ -107,6 +112,7 @@ impl TokenBreakdown {
             + self.tool_call_inputs
             + self.tool_call_outputs
             + self.assistant_context
+            + self.assistant_outputs
             + self.overhead
             + self.other
     }
@@ -114,6 +120,8 @@ impl TokenBreakdown {
     pub fn add(&mut self, other: Self) {
         self.system_prompt += other.system_prompt;
         self.summaries += other.summaries;
+        self.summary_inputs += other.summary_inputs;
+        self.summary_outputs += other.summary_outputs;
         self.user_requests += other.user_requests;
         self.images += other.images;
         self.skills += other.skills;
@@ -121,6 +129,7 @@ impl TokenBreakdown {
         self.tool_call_inputs += other.tool_call_inputs;
         self.tool_call_outputs += other.tool_call_outputs;
         self.assistant_context += other.assistant_context;
+        self.assistant_outputs += other.assistant_outputs;
         self.overhead += other.overhead;
         self.other += other.other;
     }
@@ -132,8 +141,16 @@ impl TokenBreakdown {
                 tokens: self.system_prompt,
             },
             BreakdownItem {
-                label: "summaries",
+                label: "rolling summaries",
                 tokens: self.summaries,
+            },
+            BreakdownItem {
+                label: "summary input",
+                tokens: self.summary_inputs,
+            },
+            BreakdownItem {
+                label: "summary output",
+                tokens: self.summary_outputs,
             },
             BreakdownItem {
                 label: "user requests",
@@ -164,6 +181,10 @@ impl TokenBreakdown {
                 tokens: self.assistant_context,
             },
             BreakdownItem {
+                label: "assistant output",
+                tokens: self.assistant_outputs,
+            },
+            BreakdownItem {
                 label: "message overhead",
                 tokens: self.overhead,
             },
@@ -190,6 +211,8 @@ impl TokenBreakdown {
         let mut scaled = Self {
             system_prompt: scale(self.system_prompt),
             summaries: scale(self.summaries),
+            summary_inputs: scale(self.summary_inputs),
+            summary_outputs: scale(self.summary_outputs),
             user_requests: scale(self.user_requests),
             images: scale(self.images),
             skills: scale(self.skills),
@@ -197,6 +220,7 @@ impl TokenBreakdown {
             tool_call_inputs: scale(self.tool_call_inputs),
             tool_call_outputs: scale(self.tool_call_outputs),
             assistant_context: scale(self.assistant_context),
+            assistant_outputs: scale(self.assistant_outputs),
             overhead: scale(self.overhead),
             other: scale(self.other),
         };
@@ -235,10 +259,28 @@ pub fn estimate_unpruned_request_tokens(
     request_breakdown: &TokenBreakdown,
     raw_history_tokens: usize,
 ) -> usize {
-    request_breakdown
-        .total()
-        .saturating_sub(request_breakdown.summaries)
-        + raw_history_tokens
+    let actual_tokens = request_breakdown.total();
+    let unpruned_tokens =
+        actual_tokens.saturating_sub(request_breakdown.summaries) + raw_history_tokens;
+    actual_tokens.max(unpruned_tokens)
+}
+
+pub fn estimate_assistant_output_tokens(message: &ChatMessage) -> usize {
+    let mut total = 0;
+    if let Some(content) = &message.content {
+        total += estimate_content_output_tokens(content);
+    }
+    if let Some(tool_calls) = &message.tool_calls {
+        for call in tool_calls {
+            total += estimate_text_tokens(&call.function.name);
+            total += estimate_text_tokens(&call.function.arguments);
+        }
+    }
+    if total > 0 {
+        total + estimate_text_tokens(&message.role) + 4
+    } else {
+        0
+    }
 }
 
 pub fn estimate_messages_breakdown(messages: &[ChatMessage]) -> TokenBreakdown {
@@ -278,6 +320,31 @@ pub fn estimate_tool_schema_tokens(tools: &[Value]) -> usize {
         total += estimate_text_tokens(&schema);
     }
     total
+}
+
+fn estimate_content_output_tokens(content: &MessageContent) -> usize {
+    match content {
+        MessageContent::Text(text) => {
+            if text.is_empty() {
+                0
+            } else {
+                estimate_text_tokens(text)
+            }
+        }
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .map(|part| match part {
+                ContentPart::Text { text } => {
+                    if text.is_empty() {
+                        0
+                    } else {
+                        estimate_text_tokens(text)
+                    }
+                }
+                ContentPart::ImageUrl { .. } => 256,
+            })
+            .sum(),
+    }
 }
 
 fn add_content_tokens(breakdown: &mut TokenBreakdown, role: &str, content: &MessageContent) {
