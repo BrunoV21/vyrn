@@ -576,11 +576,11 @@ impl Repl {
                     &tool_images,
                 ));
             }
-            compact_tool_history_if_needed(
+            prepare_tool_chain_next_request(
                 &mut messages,
                 &tool_schemas,
                 self.app.config.context.max_tokens,
-            );
+            )?;
             if round + 1 == MAX_TOOL_ROUNDS {
                 hit_tool_round_limit = true;
             }
@@ -667,13 +667,18 @@ impl Repl {
     fn full_stats_text(&self) -> String {
         let current_context = self.current_context_tokens();
         let mut text = format!(
-            "session spent: {} | session would be: {} | session saved: {} | context: {}/{}",
+            "session spent: {} | session raw-history would be: {} | session history saved: {} | context: {}/{}",
             self.app.stats.session_sent,
             self.app.stats.session_would_be,
             self.app.stats.session_saved,
             current_context,
             self.app.config.context.max_tokens,
         );
+        if self.app.stats.session_sent > 0 {
+            text.push_str(
+                "\naccounting: spent is cumulative model I/O; history saved is prior raw history replaced by summaries; context is the final retained prompt.",
+            );
+        }
         if self.app.stats.session_sent > 0 {
             text.push_str("\ncontributors:");
             text.push_str(&format_breakdown(
@@ -725,7 +730,7 @@ impl Repl {
             return self.composer_status_line();
         };
         format!(
-            "turn spent: {} | turn saved: {} | session saved: {} | context: {}/{}",
+            "turn spent: {} | turn history saved: {} | session history saved: {} | context: {}/{}",
             crate::tui::render::format_number(turn.sent as isize),
             crate::tui::render::format_number(turn.saved),
             crate::tui::render::format_number(self.app.stats.session_saved),
@@ -779,16 +784,69 @@ struct MessageRange {
     end: usize,
 }
 
-fn compact_tool_history_if_needed(
+fn prepare_tool_chain_next_request(
     messages: &mut Vec<ChatMessage>,
     tools: &[Value],
     max_tokens: usize,
-) -> bool {
+) -> Result<bool, LlmError> {
     let threshold = tool_context_compaction_threshold(max_tokens);
-    if estimate_chat_request_breakdown(messages, tools).total() < threshold {
-        return false;
+    let current_tokens = estimate_chat_request_breakdown(messages, tools).total();
+    if current_tokens < threshold {
+        return Ok(false);
     }
-    compact_tool_history(messages)
+
+    let original = messages.clone();
+    let strategies = [
+        (
+            TOOL_ROUNDS_TO_KEEP,
+            compacted_tool_history_char_limit(max_tokens, TOOL_ROUNDS_TO_KEEP),
+        ),
+        (1, compacted_tool_history_char_limit(max_tokens, 1)),
+        (0, compacted_tool_history_char_limit(max_tokens, 0)),
+    ];
+    let mut best = None;
+
+    for (keep_recent_rounds, max_history_chars) in strategies {
+        let mut candidate = original.clone();
+        let changed = compact_tool_history_with_options(
+            &mut candidate,
+            keep_recent_rounds,
+            max_history_chars,
+        );
+        let candidate_tokens = estimate_chat_request_breakdown(&candidate, tools).total();
+        if changed {
+            if best
+                .as_ref()
+                .is_none_or(|(_, best_tokens)| candidate_tokens < *best_tokens)
+            {
+                best = Some((candidate.clone(), candidate_tokens));
+            }
+            if candidate_tokens <= max_tokens {
+                *messages = candidate;
+                return Ok(true);
+            }
+        } else if current_tokens <= max_tokens {
+            return Ok(false);
+        }
+    }
+
+    if let Some((candidate, candidate_tokens)) = best {
+        *messages = candidate;
+        if candidate_tokens <= max_tokens {
+            return Ok(true);
+        }
+        return Err(LlmError::Input(format!(
+            "context budget exceeded: estimated {candidate_tokens} tokens after tool history compaction exceeds configured {max_tokens}"
+        )));
+    }
+
+    if current_tokens > max_tokens {
+        return Err(LlmError::Input(format!(
+            "context budget exceeded: estimated {current_tokens} tokens after tool calls exceeds configured {max_tokens}"
+        )));
+    }
+
+    Ok(false)
 }
 
 fn tool_context_compaction_threshold(max_tokens: usize) -> usize {
@@ -798,7 +856,11 @@ fn tool_context_compaction_threshold(max_tokens: usize) -> usize {
         .max(1)
 }
 
-fn compact_tool_history(messages: &mut Vec<ChatMessage>) -> bool {
+fn compact_tool_history_with_options(
+    messages: &mut Vec<ChatMessage>,
+    keep_recent_rounds: usize,
+    max_history_chars: usize,
+) -> bool {
     let existing_history = compacted_tool_history(messages);
     let retained = messages
         .iter()
@@ -806,11 +868,11 @@ fn compact_tool_history(messages: &mut Vec<ChatMessage>) -> bool {
         .cloned()
         .collect::<Vec<_>>();
     let rounds = completed_tool_rounds(&retained);
-    if rounds.len() <= TOOL_ROUNDS_TO_KEEP {
+    if rounds.len() <= keep_recent_rounds {
         return false;
     }
 
-    let compact_count = rounds.len() - TOOL_ROUNDS_TO_KEEP;
+    let compact_count = rounds.len() - keep_recent_rounds;
     let compacted_rounds = &rounds[..compact_count];
     let mut lines = Vec::new();
     if let Some(existing_history) = existing_history.filter(|history| !history.trim().is_empty()) {
@@ -822,7 +884,7 @@ fn compact_tool_history(messages: &mut Vec<ChatMessage>) -> bool {
 
     let compacted_message = ChatMessage::system(format!(
         "{COMPACTED_TOOL_HISTORY_PREFIX}\n{}",
-        truncate(&lines.join("\n"), 6000)
+        truncate(&lines.join("\n"), max_history_chars)
     ));
 
     let mut next = Vec::new();
@@ -843,6 +905,15 @@ fn compact_tool_history(messages: &mut Vec<ChatMessage>) -> bool {
 
     *messages = next;
     true
+}
+
+fn compacted_tool_history_char_limit(max_tokens: usize, keep_recent_rounds: usize) -> usize {
+    let history_tokens = match keep_recent_rounds {
+        0 => max_tokens / 5,
+        1 => max_tokens / 4,
+        _ => max_tokens / 3,
+    };
+    history_tokens.saturating_mul(4).clamp(256, 6000)
 }
 
 fn compacted_tool_history(messages: &[ChatMessage]) -> Option<String> {
@@ -1264,12 +1335,12 @@ fn print_stats_panel(
             crate::tui::render::format_number(ledger.session_sent as isize),
             VY_TECH_STRONG,
         ),
-        (String::from("  session would be "), VY_TEXT_MUTED),
+        (String::from("  raw-history would be "), VY_TEXT_MUTED),
         (
             crate::tui::render::format_number(ledger.session_would_be as isize),
             VY_TECH_STRONG,
         ),
-        (String::from("  session saved "), VY_TEXT_MUTED),
+        (String::from("  history saved "), VY_TEXT_MUTED),
         (
             crate::tui::render::format_number(ledger.session_saved),
             if ledger.session_saved >= 0 {
@@ -1293,6 +1364,17 @@ fn print_stats_panel(
         print_stats_line(&[(String::from("no completed requests yet"), VY_TEXT_DIM)])?;
         return print_spacer();
     }
+
+    print_stats_line(&[(
+        String::from(
+            "spent is cumulative model I/O; saved is prior raw history replaced by summaries",
+        ),
+        VY_TEXT_DIM,
+    )])?;
+    print_stats_line(&[(
+        String::from("context is the retained final prompt, not cumulative tokens sent"),
+        VY_TEXT_DIM,
+    )])?;
 
     print_stats_line(&[(String::from("contributors"), VY_VIOLET)])?;
     for item in session_breakdown(ledger).items().into_iter().take(8) {
@@ -2390,7 +2472,11 @@ mod tests {
             ));
         }
 
-        assert!(compact_tool_history(&mut messages));
+        assert!(compact_tool_history_with_options(
+            &mut messages,
+            TOOL_ROUNDS_TO_KEEP,
+            6000
+        ));
 
         let compacted = messages
             .iter()
@@ -2409,6 +2495,94 @@ mod tests {
                 .count(),
             TOOL_ROUNDS_TO_KEEP
         );
+    }
+
+    #[test]
+    fn tool_chain_prepare_skips_below_threshold() {
+        let mut messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("inspect files"),
+            tool_call_message(0),
+            ChatMessage::tool("call_0", "small output"),
+        ];
+        let original = messages.clone();
+
+        let compacted = prepare_tool_chain_next_request(&mut messages, &[], 4000).unwrap();
+
+        assert!(!compacted);
+        assert_eq!(messages, original);
+    }
+
+    #[test]
+    fn tool_chain_prepare_compacts_at_threshold() {
+        let mut messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("inspect files"),
+        ];
+        for index in 0..4 {
+            messages.push(tool_call_message(index));
+            messages.push(ChatMessage::tool(
+                format!("call_{index}"),
+                "large output ".repeat(120),
+            ));
+        }
+
+        let compacted = prepare_tool_chain_next_request(&mut messages, &[], 1200).unwrap();
+
+        assert!(compacted);
+        assert!(
+            messages
+                .iter()
+                .filter_map(ChatMessage::content_text)
+                .any(|content| content.starts_with(COMPACTED_TOOL_HISTORY_PREFIX))
+        );
+        assert!(estimate_chat_request_breakdown(&messages, &[]).total() <= 1200);
+    }
+
+    #[test]
+    fn tool_history_compaction_can_drop_all_recent_rounds() {
+        let mut messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("inspect files"),
+        ];
+        for index in 0..3 {
+            messages.push(tool_call_message(index));
+            messages.push(ChatMessage::tool(
+                format!("call_{index}"),
+                format!("large output from round {index}"),
+            ));
+        }
+
+        assert!(compact_tool_history_with_options(&mut messages, 0, 6000));
+
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.role == "assistant" && message.tool_calls.is_some())
+                .count(),
+            0
+        );
+        assert!(
+            messages
+                .iter()
+                .filter_map(ChatMessage::content_text)
+                .any(|content| content.starts_with(COMPACTED_TOOL_HISTORY_PREFIX))
+        );
+    }
+
+    #[test]
+    fn tool_chain_prepare_errors_when_compacted_context_exceeds_budget() {
+        let mut messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("inspect files"),
+            tool_call_message(0),
+            ChatMessage::tool("call_0", "large output ".repeat(200)),
+        ];
+
+        let error = prepare_tool_chain_next_request(&mut messages, &[], 10).unwrap_err();
+
+        assert!(matches!(error, LlmError::Input(_)));
+        assert!(error.to_string().contains("context budget exceeded"));
     }
 
     fn tool_call_message(index: usize) -> ChatMessage {
