@@ -31,7 +31,7 @@ features:
   - title: "Raw batch power"
     details: "The batch tool is the primary extension primitive for shell work, scripts, installs, and host inspection."
   - title: "Token savings"
-    details: "Every completed turn reports tokens spent, tokens saved, and total saved for the session."
+    details: "Every completed turn reports tokens spent, history saved, and total history saved for the session."
   - title: "Open standards"
     details: "Skills use Agent Skills protocol, while MCP configuration follows .mcp.json conventions."
 ---
@@ -42,7 +42,7 @@ features:
 model llama3 context 4096<br>
 <br>
 &gt; summarize this repo and find the next implementation step<br>
-<span class="ok">turn spent: 812 | turn saved: 3,204 | session saved: 11,847 | context: 1,024/4,096</span>
+<span class="ok">turn spent: 812 | turn history saved: 3,204 | session history saved: 11,847 | context: 1,024/4,096</span>
 </div>
 
 ## The idea

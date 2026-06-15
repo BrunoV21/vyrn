@@ -349,7 +349,7 @@ LLM responses stream token by token directly to the terminal as they are returne
 After each completed request, vyrn displays a compact stats line:
 
 ```
-✓  turn spent: 812  |  turn saved: 3,204  |  session saved: 11,847
+✓  turn spent: 812  |  turn history saved: 3,204  |  session history saved: 11,847
 ```
 
 This is a permanent fixture in the UI — not hidden, not optional. It is a core part of the product identity.
