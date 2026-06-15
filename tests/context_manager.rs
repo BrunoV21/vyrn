@@ -1,7 +1,7 @@
 use vyrn::agent::tokens::TokenLedger;
 use vyrn::agent::tokens::{
-    TokenBreakdown, TurnUsage, estimate_chat_request_breakdown, estimate_messages_breakdown,
-    estimate_unpruned_request_tokens,
+    TokenBreakdown, TurnUsage, estimate_assistant_output_tokens, estimate_chat_request_breakdown,
+    estimate_messages_breakdown, estimate_unpruned_request_tokens,
 };
 use vyrn::agent::transcript::Exchange;
 use vyrn::config::SummaryAggressiveness;
@@ -75,6 +75,30 @@ fn token_ledger_accumulates_savings() {
 }
 
 #[test]
+fn token_ledger_tracks_summary_input_and_output_without_creating_savings() {
+    let mut ledger = TokenLedger::default();
+    let mut turn = TurnUsage::default();
+    turn.add_call_with_breakdown(
+        "summary",
+        125,
+        125,
+        TokenBreakdown {
+            summary_inputs: 100,
+            summary_outputs: 25,
+            ..TokenBreakdown::default()
+        },
+    );
+
+    ledger.push_turn(turn);
+
+    assert_eq!(ledger.session_sent, 125);
+    assert_eq!(ledger.session_would_be, 125);
+    assert_eq!(ledger.session_saved, 0);
+    assert_eq!(ledger.turns[0].breakdown.summary_inputs, 100);
+    assert_eq!(ledger.turns[0].breakdown.summary_outputs, 25);
+}
+
+#[test]
 fn unpruned_request_tokens_replace_summary_with_raw_history() {
     let messages = vec![
         ChatMessage::system("[role] terminal agent"),
@@ -129,6 +153,37 @@ fn unpruned_request_tokens_keep_current_turn_tool_history() {
     assert_eq!(
         second_would_be,
         second_breakdown.total() - second_breakdown.summaries + raw_history_tokens
+    );
+}
+
+#[test]
+fn assistant_output_tokens_are_added_to_both_sent_and_would_be() {
+    let request = vec![
+        ChatMessage::system("[role] terminal agent"),
+        ChatMessage::system("[summary]\nPrevious summarized work"),
+        ChatMessage::user("inspect src/lib.rs"),
+    ];
+    let request_breakdown = estimate_messages_breakdown(&request);
+    let raw_history_tokens = request_breakdown.summaries + 10;
+    let output_tokens = estimate_assistant_output_tokens(&ChatMessage::assistant("Done."));
+
+    let mut turn = TurnUsage::default();
+    turn.add_call_with_breakdown(
+        "agent",
+        request_breakdown.total() + output_tokens,
+        estimate_unpruned_request_tokens(&request_breakdown, raw_history_tokens) + output_tokens,
+        {
+            let mut breakdown = request_breakdown;
+            breakdown.assistant_outputs = output_tokens;
+            breakdown
+        },
+    );
+
+    assert_eq!(turn.breakdown.assistant_outputs, output_tokens);
+    assert_eq!(
+        turn.would_be as isize - turn.sent as isize,
+        estimate_unpruned_request_tokens(&request_breakdown, raw_history_tokens) as isize
+            - request_breakdown.total() as isize
     );
 }
 

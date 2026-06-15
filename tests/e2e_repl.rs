@@ -67,7 +67,7 @@ api_key = ""
     assert!(stdout.contains("> using llama3 @"));
     assert!(stdout.contains("[read_file ok]"));
     assert!(stdout.contains("I read fixture.txt: hello from e2e."));
-    assert!(stdout.contains("turn sent:"));
+    assert!(stdout.contains("turn spent:"));
 }
 
 #[test]
@@ -75,12 +75,21 @@ fn stats_command_prints_token_contributors() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let _body = read_http_body(&mut stream);
-        write_sse(
-            &mut stream,
-            r#"data: {"choices":[{"delta":{"content":"Done."}}]}"#,
-        );
+        for index in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _body = read_http_body(&mut stream);
+            if index == 1 {
+                write_json(
+                    &mut stream,
+                    r#"{"choices":[{"message":{"role":"assistant","content":"Previous request completed."}}],"usage":{"prompt_tokens":91,"completion_tokens":17,"total_tokens":108}}"#,
+                );
+            } else {
+                write_sse(
+                    &mut stream,
+                    r#"data: {"choices":[{"delta":{"content":"Done."}}]}"#,
+                );
+            }
+        }
     });
 
     let temp = tempdir().unwrap();
@@ -121,7 +130,11 @@ api_key = ""
 
     {
         let stdin = child.stdin.as_mut().unwrap();
-        stdin.write_all(b"say done\n/stats\n/exit\n").unwrap();
+        stdin
+            .write_all(
+                b"say done with enough user request detail for stats accounting\ncontinue with enough user request detail for stats accounting\n/stats\n/exit\n",
+            )
+            .unwrap();
     }
 
     let output = child.wait_with_output().unwrap();
@@ -133,8 +146,10 @@ api_key = ""
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("session sent"), "{stdout}");
+    assert!(stdout.contains("session spent"), "{stdout}");
     assert!(stdout.contains("contributors:"), "{stdout}");
+    assert!(stdout.contains("summary input:"), "{stdout}");
+    assert!(stdout.contains("summary output:"), "{stdout}");
     assert!(stdout.contains("tools:"), "{stdout}");
     assert!(stdout.contains("skills:"), "{stdout}");
     assert!(stdout.contains("user requests:"), "{stdout}");
@@ -405,6 +420,15 @@ fn write_sse(stream: &mut TcpStream, event: &str) {
     let body = format!("{event}\n\ndata: [DONE]\n\n");
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(response.as_bytes()).unwrap();
+}
+
+fn write_json(stream: &mut TcpStream, body: &str) {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
         body.len(),
         body
     );
