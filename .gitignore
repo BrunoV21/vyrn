@@ -9,5 +9,6 @@ docs/official/.vitepress/dist/
 
 .ferrisgrid/
 .vyrn/config.toml
+.vyrn/history.json
 .vyrn/models.toml
 .vyrn/state.toml
