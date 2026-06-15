@@ -10,7 +10,7 @@ pub fn startup(model_name: &str, base_url: &str, manifest: &MachineManifest, max
 
 pub fn stats(ledger: &TokenLedger) {
     println!(
-        "turn sent: {} | turn saved: {} | session saved: {}",
+        "turn spent: {} | turn saved: {} | session saved: {}",
         format_number(
             ledger
                 .turns

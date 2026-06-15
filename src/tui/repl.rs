@@ -1,7 +1,7 @@
 use crate::agent::prompt::build_agent_prompt;
 use crate::agent::tokens::{
-    TokenBreakdown, TokenLedger, TurnUsage, estimate_chat_request_breakdown,
-    estimate_unpruned_request_tokens,
+    TokenBreakdown, TokenLedger, TurnUsage, estimate_assistant_output_tokens,
+    estimate_chat_request_breakdown, estimate_unpruned_request_tokens,
 };
 use crate::agent::transcript::{Exchange, truncate};
 use crate::app::App;
@@ -92,7 +92,6 @@ const VY_RED: Color = Color::Rgb {
     b: 94,
 };
 const STEEL_BLUE: Color = VY_TECH;
-const GRAPHITE_SURFACE: Color = VY_SURFACE;
 const GRAPHITE_SURFACE_RAISED: Color = VY_SURFACE_RAISED;
 const SYSTEM_SURFACE: Color = VY_SURFACE;
 
@@ -444,11 +443,16 @@ impl Repl {
             .refresh_summary(&self.app.client, initial_prompt.estimated_tokens.tokens)
             .await?
         {
+            let summary_total = summary_usage.input_tokens + summary_usage.output_tokens;
             usage.add_call_with_breakdown(
                 "summary",
-                summary_usage.sent,
-                summary_usage.sent,
-                summary_usage.breakdown,
+                summary_total,
+                summary_total,
+                TokenBreakdown {
+                    summary_inputs: summary_usage.input_tokens,
+                    summary_outputs: summary_usage.output_tokens,
+                    ..TokenBreakdown::default()
+                },
             );
         }
         emit(TuiUpdate::SummaryDone);
@@ -470,16 +474,10 @@ impl Repl {
         for round in 0..MAX_TOOL_ROUNDS {
             let tool_schemas = self.app.tools.schemas();
             let request_breakdown = estimate_chat_request_breakdown(&messages, &tool_schemas);
-            let sent = request_breakdown.total();
-            let would_be = estimate_unpruned_request_tokens(
+            let request_tokens = request_breakdown.total();
+            let request_would_be = estimate_unpruned_request_tokens(
                 &request_breakdown,
                 self.app.context.raw_history_tokens(),
-            );
-            usage.add_call_with_breakdown(
-                format!("agent-{round}"),
-                sent,
-                would_be,
-                request_breakdown,
             );
 
             emit(TuiUpdate::AssistantStart);
@@ -510,6 +508,19 @@ impl Repl {
                 .first()
                 .map(|choice| choice.message.clone())
                 .ok_or(LlmError::MissingChoice)?;
+            let output_tokens = response
+                .usage
+                .map(|usage| usage.completion_tokens)
+                .filter(|tokens| *tokens > 0)
+                .unwrap_or_else(|| estimate_assistant_output_tokens(&message));
+            let mut call_breakdown = request_breakdown;
+            call_breakdown.assistant_outputs += output_tokens;
+            usage.add_call_with_breakdown(
+                format!("agent-{round}"),
+                request_tokens + output_tokens,
+                request_would_be + output_tokens,
+                call_breakdown,
+            );
 
             if message.content.is_some() {
                 if let Some(text) = message.content_text() {
@@ -656,7 +667,7 @@ impl Repl {
     fn full_stats_text(&self) -> String {
         let current_context = self.current_context_tokens();
         let mut text = format!(
-            "session sent: {} | session would be: {} | session saved: {} | context: {}/{}",
+            "session spent: {} | session would be: {} | session saved: {} | context: {}/{}",
             self.app.stats.session_sent,
             self.app.stats.session_would_be,
             self.app.stats.session_saved,
@@ -714,7 +725,7 @@ impl Repl {
             return self.composer_status_line();
         };
         format!(
-            "turn sent: {} | turn saved: {} | session saved: {} | context: {}/{}",
+            "turn spent: {} | turn saved: {} | session saved: {} | context: {}/{}",
             crate::tui::render::format_number(turn.sent as isize),
             crate::tui::render::format_number(turn.saved),
             crate::tui::render::format_number(self.app.stats.session_saved),
@@ -1248,7 +1259,7 @@ fn print_stats_panel(
     print_stats_line(&[(String::from("stats"), VY_VIOLET)])?;
 
     print_stats_line(&[
-        (String::from("session sent "), VY_TEXT_MUTED),
+        (String::from("session spent "), VY_TEXT_MUTED),
         (
             crate::tui::render::format_number(ledger.session_sent as isize),
             VY_TECH_STRONG,
@@ -1747,13 +1758,8 @@ fn print_assistant_prefix() -> anyhow::Result<()> {
         std::io::stdout(),
         MoveToColumn(0),
         Clear(ClearType::CurrentLine),
-        SetBackgroundColor(GRAPHITE_SURFACE),
-        Print(terminal_fill()),
-        MoveToColumn(0),
-        SetBackgroundColor(GRAPHITE_SURFACE),
         SetForegroundColor(VY_TEXT_MUTED),
         Print("• "),
-        SetBackgroundColor(GRAPHITE_SURFACE),
         SetForegroundColor(VY_TECH_STRONG),
     )?;
     std::io::stdout().flush()?;
@@ -1823,7 +1829,6 @@ impl MarkdownStreamRenderer {
         execute!(
             std::io::stdout(),
             SetAttribute(Attribute::Reset),
-            SetBackgroundColor(GRAPHITE_SURFACE),
             SetForegroundColor(VY_TECH_STRONG),
             Print("\r\n")
         )?;
@@ -1990,7 +1995,6 @@ fn print_styled_segments(segments: &[StyledSegment]) -> anyhow::Result<()> {
         execute!(
             stdout,
             SetAttribute(Attribute::Reset),
-            SetBackgroundColor(GRAPHITE_SURFACE),
             SetForegroundColor(markdown_style_color(segment.style))
         )?;
         if segment.style.bold {
@@ -2007,7 +2011,6 @@ fn print_styled_segments(segments: &[StyledSegment]) -> anyhow::Result<()> {
     execute!(
         stdout,
         SetAttribute(Attribute::Reset),
-        SetBackgroundColor(GRAPHITE_SURFACE),
         SetForegroundColor(VY_TECH_STRONG)
     )?;
     stdout.flush()?;
