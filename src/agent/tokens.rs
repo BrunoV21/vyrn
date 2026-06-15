@@ -1,5 +1,6 @@
 use crate::llm::{ChatMessage, ContentPart, MessageContent};
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenEstimate {
@@ -38,6 +39,7 @@ pub struct TokenBreakdown {
     pub summaries: usize,
     pub user_requests: usize,
     pub images: usize,
+    pub skills: usize,
     pub tool_schemas: usize,
     pub tool_call_inputs: usize,
     pub tool_call_outputs: usize,
@@ -100,6 +102,7 @@ impl TokenBreakdown {
             + self.summaries
             + self.user_requests
             + self.images
+            + self.skills
             + self.tool_schemas
             + self.tool_call_inputs
             + self.tool_call_outputs
@@ -113,6 +116,7 @@ impl TokenBreakdown {
         self.summaries += other.summaries;
         self.user_requests += other.user_requests;
         self.images += other.images;
+        self.skills += other.skills;
         self.tool_schemas += other.tool_schemas;
         self.tool_call_inputs += other.tool_call_inputs;
         self.tool_call_outputs += other.tool_call_outputs;
@@ -138,6 +142,10 @@ impl TokenBreakdown {
             BreakdownItem {
                 label: "images",
                 tokens: self.images,
+            },
+            BreakdownItem {
+                label: "skills",
+                tokens: self.skills,
             },
             BreakdownItem {
                 label: "tools",
@@ -184,6 +192,7 @@ impl TokenBreakdown {
             summaries: scale(self.summaries),
             user_requests: scale(self.user_requests),
             images: scale(self.images),
+            skills: scale(self.skills),
             tool_schemas: scale(self.tool_schemas),
             tool_call_inputs: scale(self.tool_call_inputs),
             tool_call_outputs: scale(self.tool_call_outputs),
@@ -224,15 +233,28 @@ pub fn estimate_chat_request_tokens(messages: &[ChatMessage], tools: &[Value]) -
 
 pub fn estimate_messages_breakdown(messages: &[ChatMessage]) -> TokenBreakdown {
     let mut breakdown = TokenBreakdown::default();
+    let mut skill_tool_call_ids = BTreeSet::new();
     for message in messages {
         breakdown.overhead += estimate_text_tokens(&message.role) + 4;
         if let Some(content) = &message.content {
-            add_content_tokens(&mut breakdown, &message.role, content);
+            if message.role == "tool"
+                && message
+                    .tool_call_id
+                    .as_ref()
+                    .is_some_and(|id| skill_tool_call_ids.contains(id))
+            {
+                add_skill_content_tokens(&mut breakdown, content);
+            } else {
+                add_content_tokens(&mut breakdown, &message.role, content);
+            }
         }
         if let Some(tool_calls) = &message.tool_calls {
             for call in tool_calls {
                 breakdown.tool_call_inputs += estimate_text_tokens(&call.function.name);
                 breakdown.tool_call_inputs += estimate_text_tokens(&call.function.arguments);
+                if is_skill_read_tool_call(call) {
+                    skill_tool_call_ids.insert(call.id.clone());
+                }
             }
         }
     }
@@ -264,14 +286,68 @@ fn add_content_tokens(breakdown: &mut TokenBreakdown, role: &str, content: &Mess
     }
 }
 
+fn add_skill_content_tokens(breakdown: &mut TokenBreakdown, content: &MessageContent) {
+    match content {
+        MessageContent::Text(text) => breakdown.skills += estimate_text_tokens(text),
+        MessageContent::Parts(parts) => {
+            for part in parts {
+                match part {
+                    ContentPart::Text { text } => breakdown.skills += estimate_text_tokens(text),
+                    ContentPart::ImageUrl { .. } => breakdown.images += 256,
+                }
+            }
+        }
+    }
+}
+
 fn add_text_tokens(breakdown: &mut TokenBreakdown, role: &str, text: &str) {
     let tokens = estimate_text_tokens(text);
     match role {
         "system" if text.starts_with("[summary]") => breakdown.summaries += tokens,
-        "system" => breakdown.system_prompt += tokens,
+        "system" => add_system_text_tokens(breakdown, text),
         "user" => breakdown.user_requests += tokens,
         "assistant" => breakdown.assistant_context += tokens,
         "tool" => breakdown.tool_call_outputs += tokens,
         _ => breakdown.other += tokens,
     }
+}
+
+fn add_system_text_tokens(breakdown: &mut TokenBreakdown, text: &str) {
+    const AVAILABLE_SKILLS_MARKER: &str = "[available_skills]";
+    let Some(marker_start) = text.find(AVAILABLE_SKILLS_MARKER) else {
+        add_system_manifest_text_tokens(breakdown, text);
+        return;
+    };
+
+    let (system_text, skills_text) = text.split_at(marker_start);
+    if !system_text.trim().is_empty() {
+        add_system_manifest_text_tokens(breakdown, system_text);
+    }
+    if !skills_text.trim().is_empty() {
+        breakdown.skills += estimate_text_tokens(skills_text);
+    }
+}
+
+fn add_system_manifest_text_tokens(breakdown: &mut TokenBreakdown, text: &str) {
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with("[skills]") {
+            breakdown.skills += estimate_text_tokens(line);
+        } else if !line.trim().is_empty() {
+            breakdown.system_prompt += estimate_text_tokens(line);
+        }
+    }
+}
+
+fn is_skill_read_tool_call(call: &crate::llm::ToolCall) -> bool {
+    if call.function.name != "read_file" {
+        return false;
+    }
+
+    let Ok(arguments) = serde_json::from_str::<Value>(&call.function.arguments) else {
+        return false;
+    };
+    arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .is_some_and(|path| path.replace('\\', "/").ends_with("/SKILL.md") || path == "SKILL.md")
 }
