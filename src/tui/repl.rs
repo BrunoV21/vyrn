@@ -22,12 +22,13 @@ use crossterm::style::{
 };
 use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size};
 use serde_json::Value;
+use std::fs::OpenOptions;
 use std::io::IsTerminal;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 const SLASH_COMMANDS: &[&str] = &[
@@ -116,6 +117,13 @@ impl Repl {
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
+        self.debug_log(format!(
+            "session_start model={} base_url={} context={} verbose={}",
+            self.app.model.name,
+            self.app.model.base_url,
+            self.app.config.context.max_tokens,
+            self.app.verbose
+        ));
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
             self.run_inline_tui().await
         } else {
@@ -158,6 +166,7 @@ impl Repl {
                 })
                 .await
             {
+                self.debug_log(format!("turn_error error={}", error));
                 eprintln!("error: {}", format_error(&error, self.app.debug));
             }
         }
@@ -278,10 +287,12 @@ impl Repl {
             match result {
                 Ok(()) => {}
                 Err(LlmError::Canceled) => {
+                    self.debug_log("turn_canceled");
                     composer_status = "last turn canceled".to_string();
                     let _ = print_system_block("canceled");
                 }
                 Err(error) => {
+                    self.debug_log(format!("turn_error error={}", error));
                     let formatted = format_error(&error, self.app.debug);
                     composer_status = "last turn failed; run with --debug for details".to_string();
                     let _ = print_error_block(&formatted);
@@ -432,6 +443,14 @@ impl Repl {
             &user_input.text,
             &images,
         );
+        self.debug_log(format!(
+            "turn_start user_tokens={} images={} initial_prompt_tokens={} raw_history_tokens={} has_summary={}",
+            crate::agent::tokens::estimate_text_tokens(&user_input.text),
+            images.len(),
+            initial_prompt.estimated_tokens.tokens,
+            self.app.context.raw_history_tokens(),
+            self.app.context.summary().is_some()
+        ));
         let mut usage = TurnUsage::default();
 
         if self.app.context.previous_exchange().is_some() {
@@ -444,6 +463,13 @@ impl Repl {
             .await?
         {
             let summary_total = summary_usage.input_tokens + summary_usage.output_tokens;
+            self.debug_log(format!(
+                "summary_refresh input_tokens={} output_tokens={} total_tokens={} next_prompt_estimate={}",
+                summary_usage.input_tokens,
+                summary_usage.output_tokens,
+                summary_total,
+                initial_prompt.estimated_tokens.tokens
+            ));
             usage.add_call_with_breakdown(
                 "summary",
                 summary_total,
@@ -479,6 +505,18 @@ impl Repl {
                 &request_breakdown,
                 self.app.context.raw_history_tokens(),
             );
+            self.debug_log(format!(
+                "agent_request round={} request_tokens={} would_be={} max_context={} messages={} tool_schema_tokens={} summaries={} tool_outputs={} assistant_context={}",
+                round,
+                request_tokens,
+                request_would_be,
+                self.app.config.context.max_tokens,
+                messages.len(),
+                request_breakdown.tool_schemas,
+                request_breakdown.summaries,
+                request_breakdown.tool_call_outputs,
+                request_breakdown.assistant_context
+            ));
 
             emit(TuiUpdate::AssistantStart);
             let response = self
@@ -531,6 +569,13 @@ impl Repl {
             }
 
             let tool_calls = message.tool_calls.clone().unwrap_or_default();
+            self.debug_log(format!(
+                "agent_response round={} output_tokens={} tool_calls={} assistant_content={}",
+                round,
+                output_tokens,
+                tool_calls.len(),
+                message.content.is_some()
+            ));
             if tool_calls.is_empty() {
                 break;
             }
@@ -576,11 +621,33 @@ impl Repl {
                     &tool_images,
                 ));
             }
-            prepare_tool_chain_next_request(
+            let preparation = match prepare_tool_chain_next_request(
                 &mut messages,
                 &tool_schemas,
                 self.app.config.context.max_tokens,
-            )?;
+            ) {
+                Ok(preparation) => preparation,
+                Err(error) => {
+                    self.debug_log(format!(
+                        "tool_chain_prepare_error round={} error={}",
+                        round, error
+                    ));
+                    return Err(error);
+                }
+            };
+            self.debug_log(format!(
+                "tool_chain_prepare round={} before_tokens={} after_tokens={} threshold={} max_context={} compacted={} retained_rounds={}",
+                round,
+                preparation.before_tokens,
+                preparation.after_tokens,
+                preparation.threshold,
+                preparation.max_tokens,
+                preparation.compacted,
+                preparation
+                    .retained_rounds
+                    .map(|rounds| rounds.to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            ));
             if round + 1 == MAX_TOOL_ROUNDS {
                 hit_tool_round_limit = true;
             }
@@ -595,6 +662,18 @@ impl Repl {
         usage.context_tokens =
             estimate_chat_request_breakdown(&messages, &self.app.tools.schemas()).total();
         self.app.stats.push_turn(usage);
+        if let Some(turn) = self.app.stats.turns.last() {
+            self.debug_log(format!(
+                "turn_complete sent={} would_be={} history_saved={} context_tokens={} session_sent={} session_would_be={} session_history_saved={}",
+                turn.sent,
+                turn.would_be,
+                turn.saved,
+                turn.context_tokens,
+                self.app.stats.session_sent,
+                self.app.stats.session_would_be,
+                self.app.stats.session_saved
+            ));
+        }
         if hit_tool_round_limit {
             return Err(LlmError::ToolRoundLimit {
                 rounds: MAX_TOOL_ROUNDS,
@@ -608,6 +687,20 @@ impl Repl {
         }
 
         Ok(())
+    }
+
+    fn debug_log(&self, event: impl AsRef<str>) {
+        if !self.app.debug {
+            return;
+        }
+        let path = self.app.sources.project_vyrn.join("debug.log");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+            return;
+        };
+        let _ = writeln!(file, "[{}] {}", unix_timestamp_millis(), event.as_ref());
     }
 
     async fn execute_tool_call(
@@ -778,21 +871,45 @@ fn format_breakdown(breakdown: &TokenBreakdown, total: usize, limit: usize) -> S
     text
 }
 
+fn unix_timestamp_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone, Copy)]
 struct MessageRange {
     start: usize,
     end: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ToolChainPreparation {
+    before_tokens: usize,
+    after_tokens: usize,
+    threshold: usize,
+    max_tokens: usize,
+    compacted: bool,
+    retained_rounds: Option<usize>,
+}
+
 fn prepare_tool_chain_next_request(
     messages: &mut Vec<ChatMessage>,
     tools: &[Value],
     max_tokens: usize,
-) -> Result<bool, LlmError> {
+) -> Result<ToolChainPreparation, LlmError> {
     let threshold = tool_context_compaction_threshold(max_tokens);
     let current_tokens = estimate_chat_request_breakdown(messages, tools).total();
     if current_tokens < threshold {
-        return Ok(false);
+        return Ok(ToolChainPreparation {
+            before_tokens: current_tokens,
+            after_tokens: current_tokens,
+            threshold,
+            max_tokens,
+            compacted: false,
+            retained_rounds: None,
+        });
     }
 
     let original = messages.clone();
@@ -817,23 +934,44 @@ fn prepare_tool_chain_next_request(
         if changed {
             if best
                 .as_ref()
-                .is_none_or(|(_, best_tokens)| candidate_tokens < *best_tokens)
+                .is_none_or(|(_, best_tokens, _)| candidate_tokens < *best_tokens)
             {
-                best = Some((candidate.clone(), candidate_tokens));
+                best = Some((candidate.clone(), candidate_tokens, keep_recent_rounds));
             }
             if candidate_tokens <= max_tokens {
                 *messages = candidate;
-                return Ok(true);
+                return Ok(ToolChainPreparation {
+                    before_tokens: current_tokens,
+                    after_tokens: candidate_tokens,
+                    threshold,
+                    max_tokens,
+                    compacted: true,
+                    retained_rounds: Some(keep_recent_rounds),
+                });
             }
         } else if current_tokens <= max_tokens {
-            return Ok(false);
+            return Ok(ToolChainPreparation {
+                before_tokens: current_tokens,
+                after_tokens: current_tokens,
+                threshold,
+                max_tokens,
+                compacted: false,
+                retained_rounds: None,
+            });
         }
     }
 
-    if let Some((candidate, candidate_tokens)) = best {
+    if let Some((candidate, candidate_tokens, keep_recent_rounds)) = best {
         *messages = candidate;
         if candidate_tokens <= max_tokens {
-            return Ok(true);
+            return Ok(ToolChainPreparation {
+                before_tokens: current_tokens,
+                after_tokens: candidate_tokens,
+                threshold,
+                max_tokens,
+                compacted: true,
+                retained_rounds: Some(keep_recent_rounds),
+            });
         }
         return Err(LlmError::Input(format!(
             "context budget exceeded: estimated {candidate_tokens} tokens after tool history compaction exceeds configured {max_tokens}"
@@ -846,7 +984,14 @@ fn prepare_tool_chain_next_request(
         )));
     }
 
-    Ok(false)
+    Ok(ToolChainPreparation {
+        before_tokens: current_tokens,
+        after_tokens: current_tokens,
+        threshold,
+        max_tokens,
+        compacted: false,
+        retained_rounds: None,
+    })
 }
 
 fn tool_context_compaction_threshold(max_tokens: usize) -> usize {
@@ -2507,9 +2652,10 @@ mod tests {
         ];
         let original = messages.clone();
 
-        let compacted = prepare_tool_chain_next_request(&mut messages, &[], 4000).unwrap();
+        let preparation = prepare_tool_chain_next_request(&mut messages, &[], 4000).unwrap();
 
-        assert!(!compacted);
+        assert!(!preparation.compacted);
+        assert_eq!(preparation.before_tokens, preparation.after_tokens);
         assert_eq!(messages, original);
     }
 
@@ -2527,9 +2673,11 @@ mod tests {
             ));
         }
 
-        let compacted = prepare_tool_chain_next_request(&mut messages, &[], 1200).unwrap();
+        let preparation = prepare_tool_chain_next_request(&mut messages, &[], 1200).unwrap();
 
-        assert!(compacted);
+        assert!(preparation.compacted);
+        assert!(preparation.retained_rounds.is_some());
+        assert!(preparation.after_tokens <= 1200);
         assert!(
             messages
                 .iter()
