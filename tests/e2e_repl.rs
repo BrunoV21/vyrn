@@ -85,6 +85,20 @@ fn stats_command_prints_token_contributors() {
 
     let temp = tempdir().unwrap();
     std::fs::create_dir_all(temp.path().join(".vyrn")).unwrap();
+    std::fs::create_dir_all(temp.path().join(".vyrn/skills/docs")).unwrap();
+    std::fs::write(
+        temp.path().join(".vyrn/skills/docs/SKILL.md"),
+        r#"---
+name: docs
+description: Write terse terminal-native docs.
+---
+
+# Instructions
+
+Keep examples compact.
+"#,
+    )
+    .unwrap();
     std::fs::write(
         temp.path().join(".vyrn/models.toml"),
         format!(
@@ -121,6 +135,7 @@ api_key = ""
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("contributors:"), "{stdout}");
     assert!(stdout.contains("tools:"), "{stdout}");
+    assert!(stdout.contains("skills:"), "{stdout}");
     assert!(stdout.contains("user requests:"), "{stdout}");
 }
 
