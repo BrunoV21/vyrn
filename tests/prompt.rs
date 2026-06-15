@@ -25,6 +25,7 @@ fn agent_system_prompt_renders_template_slots_explicitly() {
         "\
 [role] terminal coding agent. conserve tokens.
 [rules] use tools when needed. use read_image for image files. prefer batch for shell. keep outputs compact.
+[style] no markdown headings. prefer plain short paragraphs/lists. use only inline **bold**, *italic*, ~~struck~~, or `code` when emphasis helps.
 [tools] batch:run shell in cwd by default; refresh_manifest:rescan host manifest
 [machine] macos/aarch64
 [env] git,rg
