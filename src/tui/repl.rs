@@ -1,5 +1,7 @@
 use crate::agent::prompt::build_agent_prompt;
-use crate::agent::tokens::{TokenBreakdown, TurnUsage, estimate_chat_request_breakdown};
+use crate::agent::tokens::{
+    TokenBreakdown, TokenLedger, TurnUsage, estimate_chat_request_breakdown,
+};
 use crate::agent::transcript::{Exchange, truncate};
 use crate::app::App;
 use crate::config::{ModelProfile, ModelRegistry, ModelState};
@@ -13,7 +15,10 @@ use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
 };
 use crossterm::execute;
-use crossterm::style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor, Stylize};
+use crossterm::style::{
+    Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+    Stylize,
+};
 use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size};
 use serde_json::Value;
 use std::io::IsTerminal;
@@ -38,6 +43,57 @@ const MAX_TOOL_ROUNDS: usize = 64;
 const TOOL_CONTEXT_COMPACTION_PERCENT: usize = 70;
 const TOOL_ROUNDS_TO_KEEP: usize = 2;
 const COMPACTED_TOOL_HISTORY_PREFIX: &str = "[compacted tool history]";
+const MAX_PROMPT_HISTORY: usize = 100;
+const BLOCK_SPACING_LINES: usize = 2;
+const VY_VIOLET: Color = Color::Rgb {
+    r: 139,
+    g: 92,
+    b: 246,
+};
+const VY_TECH: Color = Color::Rgb {
+    r: 125,
+    g: 162,
+    b: 194,
+};
+const VY_TECH_STRONG: Color = Color::Rgb {
+    r: 169,
+    g: 189,
+    b: 211,
+};
+const VY_SURFACE: Color = Color::Rgb {
+    r: 13,
+    g: 16,
+    b: 22,
+};
+const VY_SURFACE_RAISED: Color = Color::Rgb {
+    r: 21,
+    g: 26,
+    b: 36,
+};
+const VY_TEXT_MUTED: Color = Color::Rgb {
+    r: 152,
+    g: 163,
+    b: 179,
+};
+const VY_TEXT_DIM: Color = Color::Rgb {
+    r: 103,
+    g: 114,
+    b: 135,
+};
+const VY_SUCCESS: Color = Color::Rgb {
+    r: 159,
+    g: 232,
+    b: 112,
+};
+const VY_RED: Color = Color::Rgb {
+    r: 244,
+    g: 63,
+    b: 94,
+};
+const STEEL_BLUE: Color = VY_TECH;
+const GRAPHITE_SURFACE: Color = VY_SURFACE;
+const GRAPHITE_SURFACE_RAISED: Color = VY_SURFACE_RAISED;
+const SYSTEM_SURFACE: Color = VY_SURFACE;
 
 pub struct Repl {
     app: App,
@@ -52,9 +108,10 @@ struct UserTurnInput {
 
 impl Repl {
     pub fn new(app: App) -> Self {
+        let prompt_history = load_prompt_history(&app.sources);
         Self {
             app,
-            prompt_history: Vec::new(),
+            prompt_history,
         }
     }
 
@@ -135,6 +192,7 @@ impl Repl {
             let mut spinner: Option<Spinner> = None;
             let mut assistant_prefix_printed = false;
             let mut assistant_display_started = false;
+            let mut assistant_renderer = MarkdownStreamRenderer::new();
             let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
             let cancel_stop = Arc::new(AtomicBool::new(false));
             let cancel_handle = spawn_escape_listener(Arc::clone(&cancel_stop), cancel_tx);
@@ -171,7 +229,7 @@ impl Repl {
                             let _ = print_assistant_prefix();
                             assistant_prefix_printed = true;
                         }
-                        let _ = print_stream_text(&delta);
+                        let _ = assistant_renderer.push(&delta);
                     }
                 }
                 TuiUpdate::AssistantDone => {
@@ -179,6 +237,7 @@ impl Repl {
                         spinner.stop();
                     }
                     if assistant_prefix_printed {
+                        let _ = assistant_renderer.finish();
                         let _ = finish_assistant_block();
                     }
                 }
@@ -279,7 +338,12 @@ impl Repl {
         match input {
             "/exit" => Ok(true),
             "/stats" => {
-                print_system_block(&self.full_stats_text())?;
+                print_stats_panel(
+                    &self.app.stats,
+                    self.current_context_tokens(),
+                    self.app.config.context.max_tokens,
+                    self.app.verbose,
+                )?;
                 Ok(false)
             }
             "/manifest" => {
@@ -582,20 +646,15 @@ impl Repl {
         }
 
         self.prompt_history.push(input.to_string());
-        const MAX_PROMPT_HISTORY: usize = 100;
         if self.prompt_history.len() > MAX_PROMPT_HISTORY {
-            self.prompt_history.remove(0);
+            let to_drop = self.prompt_history.len() - MAX_PROMPT_HISTORY;
+            self.prompt_history.drain(..to_drop);
         }
+        let _ = save_prompt_history(&self.app.sources, &self.prompt_history);
     }
 
     fn full_stats_text(&self) -> String {
-        let current_context = self
-            .app
-            .stats
-            .turns
-            .last()
-            .map(|turn| turn.context_tokens)
-            .unwrap_or_default();
+        let current_context = self.current_context_tokens();
         let mut text = format!(
             "session sent: {} | would_be: {} | saved: {} | context: {}/{}",
             self.app.stats.session_sent,
@@ -631,6 +690,15 @@ impl Repl {
             }
         }
         text
+    }
+
+    fn current_context_tokens(&self) -> usize {
+        self.app
+            .stats
+            .turns
+            .last()
+            .map(|turn| turn.context_tokens)
+            .unwrap_or_default()
     }
 
     fn session_breakdown(&self) -> TokenBreakdown {
@@ -903,7 +971,7 @@ fn select_model_by_number(profiles: &[ModelProfile]) -> anyhow::Result<ModelProf
 }
 
 fn select_model_with_arrows(profiles: &[ModelProfile]) -> anyhow::Result<Option<ModelProfile>> {
-    println!("\r\n{}", "models".cyan().bold());
+    println!("\r\n{}", "models".with(STEEL_BLUE).bold());
     let mut selected = 0;
     render_model_picker(profiles, selected, false)?;
 
@@ -978,7 +1046,7 @@ fn render_model_picker(
         if idx == selected {
             execute!(
                 std::io::stdout(),
-                SetForegroundColor(Color::Cyan),
+                SetForegroundColor(STEEL_BLUE),
                 Print("> "),
                 Print(row),
                 ResetColor,
@@ -997,7 +1065,7 @@ fn render_model_picker(
         std::io::stdout(),
         MoveToColumn(0),
         Clear(ClearType::CurrentLine),
-        SetForegroundColor(Color::DarkGrey),
+        SetForegroundColor(VY_TEXT_DIM),
         Print(help),
         ResetColor,
         Print("\r\n")
@@ -1083,7 +1151,7 @@ impl Spinner {
                     std::io::stdout(),
                     MoveToColumn(0),
                     Clear(ClearType::CurrentLine),
-                    SetForegroundColor(Color::DarkGrey),
+                    SetForegroundColor(VY_TEXT_DIM),
                     Print(format!(
                         "{} Working ({}s • esc to interrupt) - {}",
                         frames[idx % frames.len()],
@@ -1154,8 +1222,130 @@ fn print_block_line(
 }
 
 fn print_spacer() -> anyhow::Result<()> {
-    execute!(std::io::stdout(), ResetColor, Print("\r\n"))?;
-    std::io::stdout().flush()?;
+    print_blank_lines(1)
+}
+
+fn print_block_spacer() -> anyhow::Result<()> {
+    print_blank_lines(BLOCK_SPACING_LINES)
+}
+
+fn print_blank_lines(count: usize) -> anyhow::Result<()> {
+    let mut stdout = std::io::stdout();
+    execute!(stdout, ResetColor)?;
+    for _ in 0..count {
+        execute!(stdout, Print("\r\n"))?;
+    }
+    stdout.flush()?;
+    Ok(())
+}
+
+fn print_stats_panel(
+    ledger: &TokenLedger,
+    current_context: usize,
+    max_context: usize,
+    verbose: bool,
+) -> anyhow::Result<()> {
+    print_stats_line(&[(String::from("stats"), VY_VIOLET)])?;
+
+    print_stats_line(&[
+        (String::from("sent "), VY_TEXT_MUTED),
+        (
+            crate::tui::render::format_number(ledger.session_sent as isize),
+            VY_TECH_STRONG,
+        ),
+        (String::from("  would be "), VY_TEXT_MUTED),
+        (
+            crate::tui::render::format_number(ledger.session_would_be as isize),
+            VY_TECH_STRONG,
+        ),
+        (String::from("  saved "), VY_TEXT_MUTED),
+        (
+            crate::tui::render::format_number(ledger.session_saved),
+            if ledger.session_saved >= 0 {
+                VY_SUCCESS
+            } else {
+                VY_RED
+            },
+        ),
+        (String::from("  context "), VY_TEXT_MUTED),
+        (
+            format!(
+                "{}/{}",
+                crate::tui::render::format_number(current_context as isize),
+                crate::tui::render::format_number(max_context as isize)
+            ),
+            VY_TECH,
+        ),
+    ])?;
+
+    if ledger.session_sent == 0 {
+        print_stats_line(&[(String::from("no completed requests yet"), VY_TEXT_DIM)])?;
+        return print_spacer();
+    }
+
+    print_stats_line(&[(String::from("contributors"), VY_VIOLET)])?;
+    for item in session_breakdown(ledger).items().into_iter().take(8) {
+        let pct = item.tokens.saturating_mul(100) / ledger.session_sent.max(1);
+        let value = crate::tui::render::format_number(item.tokens as isize);
+        print_stats_line(&[
+            (String::from("  "), VY_TEXT_DIM),
+            (item.label.to_string(), VY_TEXT_MUTED),
+            (String::from(": "), VY_TEXT_DIM),
+            (value, VY_TECH_STRONG),
+            (String::from(" ("), VY_TEXT_DIM),
+            (format!("{pct}%"), VY_TECH),
+            (String::from(")"), VY_TEXT_DIM),
+        ])?;
+    }
+
+    if verbose {
+        print_stats_line(&[(String::from("turns"), VY_VIOLET)])?;
+        for (idx, turn) in ledger.turns.iter().enumerate() {
+            print_stats_line(&[
+                (format!("  {}. ", idx + 1), VY_TEXT_DIM),
+                (String::from("sent "), VY_TEXT_MUTED),
+                (
+                    crate::tui::render::format_number(turn.sent as isize),
+                    VY_TECH_STRONG,
+                ),
+                (String::from("  would be "), VY_TEXT_MUTED),
+                (
+                    crate::tui::render::format_number(turn.would_be as isize),
+                    VY_TECH_STRONG,
+                ),
+                (String::from("  saved "), VY_TEXT_MUTED),
+                (
+                    crate::tui::render::format_number(turn.saved),
+                    if turn.saved >= 0 { VY_SUCCESS } else { VY_RED },
+                ),
+            ])?;
+        }
+    }
+
+    print_spacer()
+}
+
+fn session_breakdown(ledger: &TokenLedger) -> TokenBreakdown {
+    let mut breakdown = TokenBreakdown::default();
+    for turn in &ledger.turns {
+        breakdown.add(turn.breakdown);
+    }
+    breakdown
+}
+
+fn print_stats_line(segments: &[(String, Color)]) -> anyhow::Result<()> {
+    let mut stdout = std::io::stdout();
+    execute!(
+        stdout,
+        MoveToColumn(0),
+        Clear(ClearType::CurrentLine),
+        ResetColor
+    )?;
+    for (text, color) in segments {
+        execute!(stdout, SetForegroundColor(*color), Print(text))?;
+    }
+    execute!(stdout, ResetColor, Print("\r\n"))?;
+    stdout.flush()?;
     Ok(())
 }
 
@@ -1310,6 +1500,34 @@ fn reset_history_navigation(state: &mut ComposerState) {
     state.history_draft.clear();
 }
 
+fn load_prompt_history(sources: &crate::config::ConfigSources) -> Vec<String> {
+    let path = sources.project_vyrn.join("history.json");
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(mut history) = serde_json::from_str::<Vec<String>>(&raw) else {
+        return Vec::new();
+    };
+    history.retain(|entry| {
+        let trimmed = entry.trim();
+        !trimmed.is_empty() && !trimmed.starts_with('/')
+    });
+    if history.len() > MAX_PROMPT_HISTORY {
+        history.drain(..history.len() - MAX_PROMPT_HISTORY);
+    }
+    history
+}
+
+fn save_prompt_history(
+    sources: &crate::config::ConfigSources,
+    history: &[String],
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(&sources.project_vyrn)?;
+    let path = sources.project_vyrn.join("history.json");
+    let raw = serde_json::to_string_pretty(history).unwrap_or_else(|_| "[]".to_string());
+    std::fs::write(path, raw)
+}
+
 fn autocomplete(input: &mut String, completion: &mut CompletionState) {
     if !input.starts_with('/') || input.contains(' ') {
         return;
@@ -1377,11 +1595,7 @@ fn render_composer(
     status: &str,
 ) -> anyhow::Result<()> {
     let mut stdout = std::io::stdout();
-    let input_background = Color::Rgb {
-        r: 28,
-        g: 42,
-        b: 60,
-    };
+    let input_background = GRAPHITE_SURFACE_RAISED;
     execute!(
         stdout,
         MoveToColumn(0),
@@ -1390,17 +1604,17 @@ fn render_composer(
         Print(terminal_fill()),
         MoveToColumn(0),
         SetBackgroundColor(input_background),
-        SetForegroundColor(Color::Cyan),
+        SetForegroundColor(STEEL_BLUE),
         Print("> "),
         SetBackgroundColor(input_background),
-        SetForegroundColor(Color::White),
+        SetForegroundColor(VY_TECH_STRONG),
         Print(input)
     )?;
     if image_count > 0 {
         execute!(
             stdout,
             SetBackgroundColor(input_background),
-            SetForegroundColor(Color::Cyan),
+            SetForegroundColor(STEEL_BLUE),
             Print(format!(
                 "  [{image_count} image{}]",
                 if image_count == 1 { "" } else { "s" }
@@ -1411,20 +1625,20 @@ fn render_composer(
         execute!(
             stdout,
             SetBackgroundColor(input_background),
-            SetForegroundColor(Color::DarkGrey),
+            SetForegroundColor(VY_TEXT_DIM),
             Print(format!("  {hints}"))
         )?;
     }
     execute!(
         stdout,
         ResetColor,
-        Print("\r\n"),
+        Print("\r\n\r\n"),
         MoveToColumn(0),
         Clear(ClearType::CurrentLine),
-        SetForegroundColor(Color::DarkGrey),
+        SetForegroundColor(VY_TEXT_DIM),
         Print(status),
         ResetColor,
-        MoveUp(1),
+        MoveUp(2),
         MoveToColumn((2 + input.chars().count()) as u16)
     )?;
     stdout.flush()?;
@@ -1439,7 +1653,10 @@ fn clear_composer() -> anyhow::Result<()> {
         MoveDown(1),
         MoveToColumn(0),
         Clear(ClearType::CurrentLine),
-        MoveUp(1),
+        MoveDown(1),
+        MoveToColumn(0),
+        Clear(ClearType::CurrentLine),
+        MoveUp(2),
         MoveToColumn(0)
     )?;
     std::io::stdout().flush()?;
@@ -1459,18 +1676,20 @@ fn clear_screen() -> anyhow::Result<()> {
 fn print_welcome(app: &App) -> anyhow::Result<()> {
     let width = terminal_width().min(78).max(56);
     let border = "-".repeat(width.saturating_sub(2));
-    print_welcome_line(format!("+{border}+").cyan())?;
-    print_welcome_line(banner_line(" __     __ __   __ ____  _   _ ", width).cyan())?;
-    print_welcome_line(banner_line(" \\ \\   / / \\ \\ / /|  _ \\| \\ | |", width).cyan())?;
-    print_welcome_line(banner_line("  \\ \\ / /   \\ V / | |_) |  \\| |", width).cyan())?;
-    print_welcome_line(banner_line("   \\ V /     | |  |  _ <| |\\  |", width).cyan())?;
-    print_welcome_line(banner_line("    \\_/      |_|  |_| \\_\\_| \\_|", width).cyan())?;
-    print_welcome_line(format!("+{border}+").cyan())?;
+    print_welcome_line(format!("+{border}+").with(STEEL_BLUE))?;
+    print_welcome_line(banner_line(" __     __ __   __ ____  _   _ ", width).with(STEEL_BLUE))?;
+    print_welcome_line(
+        banner_line(" \\ \\   / / \\ \\ / /|  _ \\| \\ | |", width).with(STEEL_BLUE),
+    )?;
+    print_welcome_line(banner_line("  \\ \\ / /   \\ V / | |_) |  \\| |", width).with(STEEL_BLUE))?;
+    print_welcome_line(banner_line("   \\ V /     | |  |  _ <| |\\  |", width).with(STEEL_BLUE))?;
+    print_welcome_line(banner_line("    \\_/      |_|  |_| \\_\\_| \\_|", width).with(STEEL_BLUE))?;
+    print_welcome_line(format!("+{border}+").with(STEEL_BLUE))?;
     print_welcome_line(format!(
         "{} {}  {}",
-        "model".dark_grey(),
-        app.model.name.as_str().cyan(),
-        format!("context {}", app.config.context.max_tokens).dark_grey()
+        "model".with(VY_TEXT_DIM),
+        app.model.name.as_str().with(STEEL_BLUE),
+        format!("context {}", app.config.context.max_tokens).with(VY_TEXT_DIM)
     ))?;
     execute!(std::io::stdout(), Print("\r\n"))?;
     std::io::stdout().flush()?;
@@ -1498,15 +1717,11 @@ fn print_user_block(input: &str, image_count: usize) -> anyhow::Result<()> {
     print_block_line(
         ">",
         &user_display_line(input, image_count),
-        Color::Rgb {
-            r: 23,
-            g: 35,
-            b: 50,
-        },
-        Color::Grey,
-        Color::White,
+        GRAPHITE_SURFACE_RAISED,
+        STEEL_BLUE,
+        VY_TECH_STRONG,
     )?;
-    print_spacer()
+    print_block_spacer()
 }
 
 fn user_display_line(input: &str, image_count: usize) -> String {
@@ -1532,35 +1747,281 @@ fn print_assistant_prefix() -> anyhow::Result<()> {
         std::io::stdout(),
         MoveToColumn(0),
         Clear(ClearType::CurrentLine),
-        SetBackgroundColor(Color::Rgb { r: 8, g: 20, b: 34 }),
+        SetBackgroundColor(GRAPHITE_SURFACE),
         Print(terminal_fill()),
         MoveToColumn(0),
-        SetBackgroundColor(Color::Rgb { r: 8, g: 20, b: 34 }),
-        SetForegroundColor(Color::Grey),
+        SetBackgroundColor(GRAPHITE_SURFACE),
+        SetForegroundColor(VY_TEXT_MUTED),
         Print("• "),
-        SetBackgroundColor(Color::Rgb { r: 8, g: 20, b: 34 }),
-        SetForegroundColor(Color::White),
+        SetBackgroundColor(GRAPHITE_SURFACE),
+        SetForegroundColor(VY_TECH_STRONG),
     )?;
     std::io::stdout().flush()?;
     Ok(())
 }
 
 fn finish_assistant_block() -> anyhow::Result<()> {
-    execute!(std::io::stdout(), ResetColor, Print("\r\n\r\n"))?;
-    std::io::stdout().flush()?;
+    print_blank_lines(BLOCK_SPACING_LINES)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct MarkdownStyle {
+    bold: bool,
+    italic: bool,
+    strikethrough: bool,
+    code: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StyledSegment {
+    text: String,
+    style: MarkdownStyle,
+}
+
+#[derive(Default)]
+struct MarkdownStreamRenderer {
+    pending: String,
+    in_code_block: bool,
+}
+
+impl MarkdownStreamRenderer {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn push(&mut self, text: &str) -> anyhow::Result<()> {
+        self.pending.push_str(text);
+        while let Some(newline) = self.pending.find('\n') {
+            let mut line = self.pending.drain(..=newline).collect::<String>();
+            if line.ends_with('\n') {
+                line.pop();
+            }
+            if line.ends_with('\r') {
+                line.pop();
+            }
+            self.print_line(&line)?;
+            self.print_newline()?;
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> anyhow::Result<()> {
+        if !self.pending.is_empty() {
+            let line = std::mem::take(&mut self.pending);
+            self.print_line(line.trim_end_matches('\r'))?;
+        }
+        std::io::stdout().flush()?;
+        Ok(())
+    }
+
+    fn print_line(&mut self, line: &str) -> anyhow::Result<()> {
+        let segments = render_markdown_line(line, &mut self.in_code_block);
+        print_styled_segments(&segments)
+    }
+
+    fn print_newline(&self) -> anyhow::Result<()> {
+        execute!(
+            std::io::stdout(),
+            SetAttribute(Attribute::Reset),
+            SetBackgroundColor(GRAPHITE_SURFACE),
+            SetForegroundColor(VY_TECH_STRONG),
+            Print("\r\n")
+        )?;
+        Ok(())
+    }
+}
+
+fn render_markdown_line(line: &str, in_code_block: &mut bool) -> Vec<StyledSegment> {
+    let trimmed = line.trim();
+    if trimmed.starts_with("```") {
+        *in_code_block = !*in_code_block;
+        return Vec::new();
+    }
+    if *in_code_block {
+        return vec![StyledSegment {
+            text: line.to_string(),
+            style: MarkdownStyle {
+                code: true,
+                ..Default::default()
+            },
+        }];
+    }
+    if is_markdown_rule(trimmed) {
+        return vec![StyledSegment {
+            text: "-".repeat(terminal_width().saturating_sub(2).min(72)),
+            style: MarkdownStyle {
+                strikethrough: true,
+                ..Default::default()
+            },
+        }];
+    }
+    if let Some(heading) = strip_markdown_heading(line) {
+        let mut segments = render_inline_markdown(heading, MarkdownStyle::default());
+        for segment in &mut segments {
+            segment.style.bold = true;
+        }
+        return segments;
+    }
+    render_inline_markdown(line, MarkdownStyle::default())
+}
+
+fn strip_markdown_heading(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let hash_count = trimmed.chars().take_while(|ch| *ch == '#').count();
+    if !(1..=6).contains(&hash_count) {
+        return None;
+    }
+    let after_hashes = &trimmed[hash_count..];
+    if after_hashes.chars().next().is_some_and(char::is_whitespace) {
+        Some(after_hashes.trim_start())
+    } else {
+        None
+    }
+}
+
+fn is_markdown_rule(trimmed: &str) -> bool {
+    if trimmed.len() < 3 {
+        return false;
+    }
+    let mut chars = trimmed.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    matches!(first, '-' | '*' | '_') && chars.all(|ch| ch == first)
+}
+
+fn render_inline_markdown(input: &str, base_style: MarkdownStyle) -> Vec<StyledSegment> {
+    let mut segments = Vec::new();
+    let mut style = base_style;
+    let mut index = 0;
+    while index < input.len() {
+        let rest = &input[index..];
+        if let Some((marker, kind)) = markdown_marker(rest, style)
+            && (marker_closes(kind, style) || has_closing_marker(&rest[marker.len()..], marker))
+        {
+            toggle_markdown_style(&mut style, kind);
+            index += marker.len();
+            continue;
+        }
+        if rest.starts_with('\\')
+            && let Some((_, ch)) = rest.char_indices().nth(1)
+        {
+            push_styled_char(&mut segments, ch, style);
+            index += 1 + ch.len_utf8();
+            continue;
+        }
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        push_styled_char(&mut segments, ch, style);
+        index += ch.len_utf8();
+    }
+    segments
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkdownMarker {
+    Bold,
+    Italic,
+    Strikethrough,
+    Code,
+}
+
+fn markdown_marker(rest: &str, style: MarkdownStyle) -> Option<(&'static str, MarkdownMarker)> {
+    if style.code {
+        return rest.starts_with('`').then_some(("`", MarkdownMarker::Code));
+    }
+    if rest.starts_with("**") {
+        return Some(("**", MarkdownMarker::Bold));
+    }
+    if rest.starts_with("__") {
+        return Some(("__", MarkdownMarker::Bold));
+    }
+    if rest.starts_with("~~") {
+        return Some(("~~", MarkdownMarker::Strikethrough));
+    }
+    if rest.starts_with('`') {
+        return Some(("`", MarkdownMarker::Code));
+    }
+    if !style.code && rest.starts_with('*') {
+        return Some(("*", MarkdownMarker::Italic));
+    }
+    None
+}
+
+fn marker_closes(kind: MarkdownMarker, style: MarkdownStyle) -> bool {
+    match kind {
+        MarkdownMarker::Bold => style.bold,
+        MarkdownMarker::Italic => style.italic,
+        MarkdownMarker::Strikethrough => style.strikethrough,
+        MarkdownMarker::Code => style.code,
+    }
+}
+
+fn has_closing_marker(rest: &str, marker: &str) -> bool {
+    !rest.chars().next().is_some_and(char::is_whitespace) && rest.contains(marker)
+}
+
+fn toggle_markdown_style(style: &mut MarkdownStyle, kind: MarkdownMarker) {
+    match kind {
+        MarkdownMarker::Bold => style.bold = !style.bold,
+        MarkdownMarker::Italic => style.italic = !style.italic,
+        MarkdownMarker::Strikethrough => style.strikethrough = !style.strikethrough,
+        MarkdownMarker::Code => style.code = !style.code,
+    }
+}
+
+fn push_styled_char(segments: &mut Vec<StyledSegment>, ch: char, style: MarkdownStyle) {
+    if let Some(segment) = segments.last_mut()
+        && segment.style == style
+    {
+        segment.text.push(ch);
+        return;
+    }
+    segments.push(StyledSegment {
+        text: ch.to_string(),
+        style,
+    });
+}
+
+fn print_styled_segments(segments: &[StyledSegment]) -> anyhow::Result<()> {
+    let mut stdout = std::io::stdout();
+    for segment in segments {
+        execute!(
+            stdout,
+            SetAttribute(Attribute::Reset),
+            SetBackgroundColor(GRAPHITE_SURFACE),
+            SetForegroundColor(markdown_style_color(segment.style))
+        )?;
+        if segment.style.bold {
+            execute!(stdout, SetAttribute(Attribute::Bold))?;
+        }
+        if segment.style.italic {
+            execute!(stdout, SetAttribute(Attribute::Italic))?;
+        }
+        if segment.style.strikethrough {
+            execute!(stdout, SetAttribute(Attribute::CrossedOut))?;
+        }
+        execute!(stdout, Print(&segment.text))?;
+    }
+    execute!(
+        stdout,
+        SetAttribute(Attribute::Reset),
+        SetBackgroundColor(GRAPHITE_SURFACE),
+        SetForegroundColor(VY_TECH_STRONG)
+    )?;
+    stdout.flush()?;
     Ok(())
 }
 
-fn print_stream_text(text: &str) -> anyhow::Result<()> {
-    for ch in text.chars() {
-        match ch {
-            '\n' => print!("\r\n"),
-            '\r' => {}
-            other => print!("{other}"),
-        }
+fn markdown_style_color(style: MarkdownStyle) -> Color {
+    if style.code {
+        VY_SUCCESS
+    } else if style.strikethrough {
+        VY_TEXT_DIM
+    } else {
+        VY_TECH_STRONG
     }
-    std::io::stdout().flush()?;
-    Ok(())
 }
 
 fn print_tool_preview(name: &str, preview: &str) -> anyhow::Result<()> {
@@ -1584,8 +2045,8 @@ fn print_tool_block(name: &str, body: &str, state: ToolDisplayState) -> anyhow::
                 g: 38,
                 b: 24,
             },
-            Color::Green,
-            Color::Grey,
+            VY_SUCCESS,
+            VY_TEXT_MUTED,
         ),
         ToolDisplayState::Failure => (
             Color::Rgb {
@@ -1593,11 +2054,11 @@ fn print_tool_block(name: &str, body: &str, state: ToolDisplayState) -> anyhow::
                 g: 12,
                 b: 18,
             },
-            Color::Red,
-            Color::Grey,
+            VY_RED,
+            VY_TEXT_MUTED,
         ),
     };
-    print_block_line("tool", name, background, label_color, Color::White)?;
+    print_block_line("tool", name, background, label_color, VY_TECH_STRONG)?;
     for line in body.lines().filter(|line| !line.trim().is_empty()).take(6) {
         print_block_line(
             "   ",
@@ -1612,17 +2073,7 @@ fn print_tool_block(name: &str, body: &str, state: ToolDisplayState) -> anyhow::
 
 fn print_system_block(text: &str) -> anyhow::Result<()> {
     for line in text.lines() {
-        print_block_line(
-            "sys",
-            line,
-            Color::Rgb {
-                r: 11,
-                g: 19,
-                b: 31,
-            },
-            Color::DarkGrey,
-            Color::Grey,
-        )?;
+        print_block_line("sys", line, SYSTEM_SURFACE, STEEL_BLUE, VY_TEXT_MUTED)?;
     }
     print_spacer()
 }
@@ -1637,8 +2088,8 @@ fn print_error_block(text: &str) -> anyhow::Result<()> {
                 g: 12,
                 b: 15,
             },
-            Color::Red,
-            Color::Red,
+            VY_RED,
+            VY_RED,
         )?;
     }
     print_spacer()
@@ -1810,6 +2261,119 @@ mod tests {
     }
 
     #[test]
+    fn prompt_history_persists_in_project_vyrn() {
+        let temp = tempfile::tempdir().unwrap();
+        let sources = crate::config::ConfigSources::discover(temp.path().to_path_buf()).unwrap();
+        let history = vec!["first prompt".to_string(), "second\nprompt".to_string()];
+
+        save_prompt_history(&sources, &history).unwrap();
+
+        assert_eq!(load_prompt_history(&sources), history);
+        assert!(sources.project_vyrn.join("history.json").exists());
+    }
+
+    #[test]
+    fn prompt_history_load_filters_commands_and_keeps_recent_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let sources = crate::config::ConfigSources::discover(temp.path().to_path_buf()).unwrap();
+        std::fs::create_dir_all(&sources.project_vyrn).unwrap();
+        let mut history = vec!["/stats".to_string(), "   ".to_string()];
+        for index in 0..(MAX_PROMPT_HISTORY + 5) {
+            history.push(format!("prompt {index}"));
+        }
+        std::fs::write(
+            sources.project_vyrn.join("history.json"),
+            serde_json::to_string(&history).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_prompt_history(&sources);
+
+        assert_eq!(loaded.len(), MAX_PROMPT_HISTORY);
+        assert_eq!(loaded.first().unwrap(), "prompt 5");
+        assert_eq!(
+            loaded.last().unwrap(),
+            &format!("prompt {}", MAX_PROMPT_HISTORY + 4)
+        );
+    }
+
+    #[test]
+    fn markdown_line_strips_headings_and_inline_markers() {
+        let mut in_code_block = false;
+        let segments = render_markdown_line(
+            "### 1. **Screen Analysis** with *detail* and `code`",
+            &mut in_code_block,
+        );
+
+        let rendered = segment_text(&segments);
+        assert_eq!(rendered, "1. Screen Analysis with detail and code");
+        assert!(segments.iter().all(|segment| segment.style.bold));
+        assert!(!rendered.contains('#'));
+        assert!(!rendered.contains('*'));
+        assert!(!rendered.contains('`'));
+    }
+
+    #[test]
+    fn inline_markdown_maps_to_terminal_styles() {
+        let segments = render_inline_markdown(
+            "Use **bold**, *italic*, ~~old~~, and `src/lib.rs`.",
+            MarkdownStyle::default(),
+        );
+
+        assert_segment_style(
+            &segments,
+            "bold",
+            MarkdownStyle {
+                bold: true,
+                ..Default::default()
+            },
+        );
+        assert_segment_style(
+            &segments,
+            "italic",
+            MarkdownStyle {
+                italic: true,
+                ..Default::default()
+            },
+        );
+        assert_segment_style(
+            &segments,
+            "old",
+            MarkdownStyle {
+                strikethrough: true,
+                ..Default::default()
+            },
+        );
+        assert_segment_style(
+            &segments,
+            "src/lib.rs",
+            MarkdownStyle {
+                code: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            segment_text(&segments),
+            "Use bold, italic, old, and src/lib.rs."
+        );
+    }
+
+    #[test]
+    fn code_fences_are_hidden_and_code_lines_are_styled() {
+        let mut in_code_block = false;
+        assert!(render_markdown_line("```rust", &mut in_code_block).is_empty());
+        assert!(in_code_block);
+
+        let segments = render_markdown_line("let value = **literal**;", &mut in_code_block);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, "let value = **literal**;");
+        assert!(segments[0].style.code);
+
+        assert!(render_markdown_line("```", &mut in_code_block).is_empty());
+        assert!(!in_code_block);
+    }
+
+    #[test]
     fn tool_history_compaction_keeps_recent_rounds() {
         let mut messages = vec![
             ChatMessage::system("system"),
@@ -1856,5 +2420,20 @@ mod tests {
                 },
             }],
         )
+    }
+
+    fn segment_text(segments: &[StyledSegment]) -> String {
+        segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect()
+    }
+
+    fn assert_segment_style(segments: &[StyledSegment], text: &str, style: MarkdownStyle) {
+        let segment = segments
+            .iter()
+            .find(|segment| segment.text == text)
+            .unwrap_or_else(|| panic!("missing segment {text:?}: {segments:?}"));
+        assert_eq!(segment.style, style);
     }
 }
