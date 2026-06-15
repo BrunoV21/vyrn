@@ -12,6 +12,13 @@ Official documentation lives in `docs/official/` and is built with VitePress.
 
 Brand positioning and story notes live in `docs/branding/`.
 
+## UI and Branding
+
+When introducing or changing UI elements, including terminal UI, use the vyrn
+branding colors from `docs/branding/style-guide.md`. Prefer the documented
+violet, steel blue, graphite surfaces, muted text, success green, amber, and red
+roles instead of generic terminal colors like default white, cyan, or dark gray.
+
 When editing docs:
 
 - Keep examples token-conscious and terminal-native.

@@ -15,8 +15,9 @@ tokens_saved     = tokens_would_be - tokens_sent
 The session total is the sum of saved tokens across completed requests.
 
 `/stats` also ranks estimated prompt contributors for the current session:
-system prompt text, summaries, user requests, images, tool schemas, tool call
-input, tool call output, assistant context, and message overhead.
+system prompt text, summaries, user requests, images, skill metadata and loaded
+skill files, tool schemas, tool call input, tool call output, assistant context,
+and message overhead.
 
 ## UI contract
 

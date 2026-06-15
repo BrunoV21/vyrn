@@ -6,7 +6,7 @@
   <p>
     <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-8A2BE2?style=for-the-badge">
     <a href="https://brunov21.github.io/vyrn/"><img alt="Official documentation" src="https://img.shields.io/badge/docs-official-8A2BE2?style=for-the-badge"></a>
-    <img alt="Rust 2024" src="https://img.shields.io/badge/rust-2024-00E5FF?style=for-the-badge&logo=rust&logoColor=white">
+    <img alt="Rust 2024" src="https://img.shields.io/badge/rust-2024-7DA2C2?style=for-the-badge&logo=rust&logoColor=white">
     <img alt="Package: Rust" src="https://img.shields.io/badge/package-rust-A970FF?style=for-the-badge&logo=rust&logoColor=white">
     <img alt="OpenAI compatible" src="https://img.shields.io/badge/api-OpenAI%20compatible-111111?style=for-the-badge">
   </p>
@@ -172,7 +172,7 @@ npm install
 npm run docs:dev
 ```
 
-The docs use a terminal-brutalist standard: black surfaces, violet brand/action states, cyan technical accents, and compact agent-readable pages.
+The docs use a terminal-brutalist standard: black surfaces, violet brand/action states, steel-blue technical accents, and compact agent-readable pages.
 
 ## Implemented Surface
 
