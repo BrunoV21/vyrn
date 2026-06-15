@@ -158,6 +158,63 @@ api_key = ""
 }
 
 #[test]
+fn debug_mode_writes_token_accounting_log() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _body = read_http_body(&mut stream);
+        write_sse(
+            &mut stream,
+            r#"data: {"choices":[{"delta":{"content":"Logged."}}]}"#,
+        );
+    });
+
+    let temp = tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".vyrn")).unwrap();
+    std::fs::write(
+        temp.path().join(".vyrn/models.toml"),
+        format!(
+            r#"[models.llama3]
+base_url = "http://{addr}/v1"
+model = "fake-small"
+api_key = ""
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("--debug")
+        .current_dir(temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"say logged\n/exit\n").unwrap();
+    }
+
+    let output = child.wait_with_output().unwrap();
+    server.join().unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = std::fs::read_to_string(temp.path().join(".vyrn/debug.log")).unwrap();
+    assert!(log.contains("session_start"), "{log}");
+    assert!(log.contains("turn_start"), "{log}");
+    assert!(log.contains("agent_request round=0"), "{log}");
+    assert!(log.contains("agent_response round=0"), "{log}");
+    assert!(log.contains("turn_complete"), "{log}");
+}
+
+#[test]
 fn repl_compacts_tool_history_and_continues_past_eight_rounds() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();

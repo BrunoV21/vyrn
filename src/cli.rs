@@ -16,7 +16,7 @@ pub struct Cli {
     #[arg(long)]
     pub verbose: bool,
 
-    /// Show provider URLs, HTTP status/body, and request-level debug details on errors.
+    /// Show provider URLs, HTTP status/body, and append request-level details to .vyrn/debug.log.
     #[arg(long)]
     pub debug: bool,
 }
