@@ -1,7 +1,7 @@
 use crate::agent::prompt::build_agent_prompt;
 use crate::agent::tokens::{
     TokenBreakdown, TokenLedger, TurnUsage, estimate_assistant_output_tokens,
-    estimate_chat_request_breakdown, estimate_unpruned_request_tokens,
+    estimate_chat_request_breakdown, estimate_messages_breakdown, estimate_unpruned_request_tokens,
 };
 use crate::agent::transcript::{Exchange, truncate};
 use crate::app::App;
@@ -621,11 +621,15 @@ impl Repl {
                     &tool_images,
                 ));
             }
-            let preparation = match prepare_tool_chain_next_request(
-                &mut messages,
-                &tool_schemas,
-                self.app.config.context.max_tokens,
-            ) {
+            let preparation = match self
+                .prepare_tool_chain_next_request(
+                    &mut messages,
+                    &tool_schemas,
+                    self.app.config.context.max_tokens,
+                    &mut usage,
+                )
+                .await
+            {
                 Ok(preparation) => preparation,
                 Err(error) => {
                     self.debug_log(format!(
@@ -687,6 +691,180 @@ impl Repl {
         }
 
         Ok(())
+    }
+
+    async fn prepare_tool_chain_next_request(
+        &self,
+        messages: &mut Vec<ChatMessage>,
+        tools: &[Value],
+        max_tokens: usize,
+        usage: &mut TurnUsage,
+    ) -> Result<ToolChainPreparation, LlmError> {
+        let threshold = tool_context_compaction_threshold(max_tokens);
+        let current_tokens = estimate_chat_request_breakdown(messages, tools).total();
+        if current_tokens < threshold {
+            return Ok(ToolChainPreparation {
+                before_tokens: current_tokens,
+                after_tokens: current_tokens,
+                threshold,
+                max_tokens,
+                compacted: false,
+                retained_rounds: None,
+            });
+        }
+
+        let original = messages.clone();
+        let strategies = [TOOL_ROUNDS_TO_KEEP, 1, 0];
+        let mut best = None;
+
+        for keep_recent_rounds in strategies {
+            let Some(source) =
+                tool_history_compaction_source(&original, keep_recent_rounds, max_tokens)
+            else {
+                if current_tokens <= max_tokens {
+                    return Ok(ToolChainPreparation {
+                        before_tokens: current_tokens,
+                        after_tokens: current_tokens,
+                        threshold,
+                        max_tokens,
+                        compacted: false,
+                        retained_rounds: None,
+                    });
+                }
+                continue;
+            };
+            let compaction = self
+                .compact_tool_history_with_llm(&source, keep_recent_rounds, max_tokens)
+                .await?;
+            let total = compaction.input_tokens + compaction.output_tokens;
+            usage.add_call_with_breakdown(
+                format!("tool-compaction-{keep_recent_rounds}"),
+                total,
+                total,
+                TokenBreakdown {
+                    summary_inputs: compaction.input_tokens,
+                    summary_outputs: compaction.output_tokens,
+                    ..TokenBreakdown::default()
+                },
+            );
+
+            let mut candidate = original.clone();
+            compact_tool_history_with_summary(
+                &mut candidate,
+                keep_recent_rounds,
+                &compaction.summary,
+            );
+            let candidate_tokens = estimate_chat_request_breakdown(&candidate, tools).total();
+            if best
+                .as_ref()
+                .is_none_or(|(_, best_tokens, _)| candidate_tokens < *best_tokens)
+            {
+                best = Some((candidate.clone(), candidate_tokens, keep_recent_rounds));
+            }
+            if candidate_tokens <= max_tokens {
+                *messages = candidate;
+                return Ok(ToolChainPreparation {
+                    before_tokens: current_tokens,
+                    after_tokens: candidate_tokens,
+                    threshold,
+                    max_tokens,
+                    compacted: true,
+                    retained_rounds: Some(keep_recent_rounds),
+                });
+            }
+        }
+
+        if let Some((candidate, candidate_tokens, keep_recent_rounds)) = best {
+            *messages = candidate;
+            if candidate_tokens <= max_tokens {
+                return Ok(ToolChainPreparation {
+                    before_tokens: current_tokens,
+                    after_tokens: candidate_tokens,
+                    threshold,
+                    max_tokens,
+                    compacted: true,
+                    retained_rounds: Some(keep_recent_rounds),
+                });
+            }
+            return Err(LlmError::Input(format!(
+                "context budget exceeded: estimated {candidate_tokens} tokens after LLM tool history compaction exceeds configured {max_tokens}"
+            )));
+        }
+
+        if current_tokens > max_tokens {
+            return Err(LlmError::Input(format!(
+                "context budget exceeded: estimated {current_tokens} tokens after tool calls exceeds configured {max_tokens}"
+            )));
+        }
+
+        Ok(ToolChainPreparation {
+            before_tokens: current_tokens,
+            after_tokens: current_tokens,
+            threshold,
+            max_tokens,
+            compacted: false,
+            retained_rounds: None,
+        })
+    }
+
+    async fn compact_tool_history_with_llm(
+        &self,
+        source: &str,
+        keep_recent_rounds: usize,
+        max_tokens: usize,
+    ) -> Result<ToolHistoryCompaction, LlmError> {
+        let source = fit_tool_compaction_source_to_budget(source, keep_recent_rounds, max_tokens);
+        let messages = build_tool_history_compaction_messages(&source, keep_recent_rounds);
+        let estimated_input_tokens = estimate_messages_breakdown(&messages).total();
+        self.debug_log(format!(
+            "tool_compaction_request retained_rounds={} input_estimate={} source_chars={}",
+            keep_recent_rounds,
+            estimated_input_tokens,
+            source.chars().count()
+        ));
+        let response = self
+            .app
+            .client
+            .complete_chat(ChatCompletionRequest {
+                model: String::new(),
+                messages,
+                tools: Vec::new(),
+                tool_choice: None,
+                stream: false,
+            })
+            .await?;
+        let summary = response
+            .choices
+            .first()
+            .and_then(|choice| choice.message.content_text().map(str::trim))
+            .filter(|summary| !summary.is_empty())
+            .ok_or_else(|| {
+                LlmError::Input("tool history compaction returned an empty summary".to_string())
+            })?
+            .to_string();
+        let usage = response.usage.unwrap_or_default();
+        let input_tokens = if usage.prompt_tokens > 0 {
+            usage.prompt_tokens
+        } else {
+            estimated_input_tokens
+        };
+        let output_tokens = if usage.completion_tokens > 0 {
+            usage.completion_tokens
+        } else {
+            crate::agent::tokens::estimate_text_tokens(&summary)
+        };
+        self.debug_log(format!(
+            "tool_compaction_response retained_rounds={} input_tokens={} output_tokens={} summary_tokens={}",
+            keep_recent_rounds,
+            input_tokens,
+            output_tokens,
+            crate::agent::tokens::estimate_text_tokens(&summary)
+        ));
+        Ok(ToolHistoryCompaction {
+            summary,
+            input_tokens,
+            output_tokens,
+        })
     }
 
     fn debug_log(&self, event: impl AsRef<str>) {
@@ -894,104 +1072,11 @@ struct ToolChainPreparation {
     retained_rounds: Option<usize>,
 }
 
-fn prepare_tool_chain_next_request(
-    messages: &mut Vec<ChatMessage>,
-    tools: &[Value],
-    max_tokens: usize,
-) -> Result<ToolChainPreparation, LlmError> {
-    let threshold = tool_context_compaction_threshold(max_tokens);
-    let current_tokens = estimate_chat_request_breakdown(messages, tools).total();
-    if current_tokens < threshold {
-        return Ok(ToolChainPreparation {
-            before_tokens: current_tokens,
-            after_tokens: current_tokens,
-            threshold,
-            max_tokens,
-            compacted: false,
-            retained_rounds: None,
-        });
-    }
-
-    let original = messages.clone();
-    let strategies = [
-        (
-            TOOL_ROUNDS_TO_KEEP,
-            compacted_tool_history_char_limit(max_tokens, TOOL_ROUNDS_TO_KEEP),
-        ),
-        (1, compacted_tool_history_char_limit(max_tokens, 1)),
-        (0, compacted_tool_history_char_limit(max_tokens, 0)),
-    ];
-    let mut best = None;
-
-    for (keep_recent_rounds, max_history_chars) in strategies {
-        let mut candidate = original.clone();
-        let changed = compact_tool_history_with_options(
-            &mut candidate,
-            keep_recent_rounds,
-            max_history_chars,
-        );
-        let candidate_tokens = estimate_chat_request_breakdown(&candidate, tools).total();
-        if changed {
-            if best
-                .as_ref()
-                .is_none_or(|(_, best_tokens, _)| candidate_tokens < *best_tokens)
-            {
-                best = Some((candidate.clone(), candidate_tokens, keep_recent_rounds));
-            }
-            if candidate_tokens <= max_tokens {
-                *messages = candidate;
-                return Ok(ToolChainPreparation {
-                    before_tokens: current_tokens,
-                    after_tokens: candidate_tokens,
-                    threshold,
-                    max_tokens,
-                    compacted: true,
-                    retained_rounds: Some(keep_recent_rounds),
-                });
-            }
-        } else if current_tokens <= max_tokens {
-            return Ok(ToolChainPreparation {
-                before_tokens: current_tokens,
-                after_tokens: current_tokens,
-                threshold,
-                max_tokens,
-                compacted: false,
-                retained_rounds: None,
-            });
-        }
-    }
-
-    if let Some((candidate, candidate_tokens, keep_recent_rounds)) = best {
-        *messages = candidate;
-        if candidate_tokens <= max_tokens {
-            return Ok(ToolChainPreparation {
-                before_tokens: current_tokens,
-                after_tokens: candidate_tokens,
-                threshold,
-                max_tokens,
-                compacted: true,
-                retained_rounds: Some(keep_recent_rounds),
-            });
-        }
-        return Err(LlmError::Input(format!(
-            "context budget exceeded: estimated {candidate_tokens} tokens after tool history compaction exceeds configured {max_tokens}"
-        )));
-    }
-
-    if current_tokens > max_tokens {
-        return Err(LlmError::Input(format!(
-            "context budget exceeded: estimated {current_tokens} tokens after tool calls exceeds configured {max_tokens}"
-        )));
-    }
-
-    Ok(ToolChainPreparation {
-        before_tokens: current_tokens,
-        after_tokens: current_tokens,
-        threshold,
-        max_tokens,
-        compacted: false,
-        retained_rounds: None,
-    })
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolHistoryCompaction {
+    summary: String,
+    input_tokens: usize,
+    output_tokens: usize,
 }
 
 fn tool_context_compaction_threshold(max_tokens: usize) -> usize {
@@ -1001,12 +1086,43 @@ fn tool_context_compaction_threshold(max_tokens: usize) -> usize {
         .max(1)
 }
 
-fn compact_tool_history_with_options(
+fn tool_history_compaction_source(
+    messages: &[ChatMessage],
+    keep_recent_rounds: usize,
+    max_tokens: usize,
+) -> Option<String> {
+    let existing_history = compacted_tool_history(messages);
+    let retained = messages
+        .iter()
+        .filter(|message| !is_compacted_tool_history_message(message))
+        .cloned()
+        .collect::<Vec<_>>();
+    let rounds = completed_tool_rounds(&retained);
+    if rounds.len() <= keep_recent_rounds {
+        return None;
+    }
+
+    let compact_count = rounds.len() - keep_recent_rounds;
+    let compacted_rounds = &rounds[..compact_count];
+    let mut lines = Vec::new();
+    if let Some(existing_history) = existing_history.filter(|history| !history.trim().is_empty()) {
+        lines.push(existing_history);
+    }
+    for (idx, range) in compacted_rounds.iter().enumerate() {
+        lines.push(tool_round_compaction_source(&retained, *range, idx + 1));
+    }
+
+    Some(truncate(
+        &lines.join("\n\n"),
+        tool_compaction_source_char_limit(max_tokens),
+    ))
+}
+
+fn compact_tool_history_with_summary(
     messages: &mut Vec<ChatMessage>,
     keep_recent_rounds: usize,
-    max_history_chars: usize,
+    summary: &str,
 ) -> bool {
-    let existing_history = compacted_tool_history(messages);
     let retained = messages
         .iter()
         .filter(|message| !is_compacted_tool_history_message(message))
@@ -1019,17 +1135,9 @@ fn compact_tool_history_with_options(
 
     let compact_count = rounds.len() - keep_recent_rounds;
     let compacted_rounds = &rounds[..compact_count];
-    let mut lines = Vec::new();
-    if let Some(existing_history) = existing_history.filter(|history| !history.trim().is_empty()) {
-        lines.push(existing_history);
-    }
-    for (idx, range) in compacted_rounds.iter().enumerate() {
-        lines.push(compact_tool_round(&retained, *range, idx + 1));
-    }
-
     let compacted_message = ChatMessage::system(format!(
         "{COMPACTED_TOOL_HISTORY_PREFIX}\n{}",
-        truncate(&lines.join("\n"), max_history_chars)
+        summary.trim()
     ));
 
     let mut next = Vec::new();
@@ -1052,13 +1160,41 @@ fn compact_tool_history_with_options(
     true
 }
 
-fn compacted_tool_history_char_limit(max_tokens: usize, keep_recent_rounds: usize) -> usize {
-    let history_tokens = match keep_recent_rounds {
-        0 => max_tokens / 5,
-        1 => max_tokens / 4,
-        _ => max_tokens / 3,
-    };
-    history_tokens.saturating_mul(4).clamp(256, 6000)
+fn tool_compaction_source_char_limit(max_tokens: usize) -> usize {
+    max_tokens.saturating_mul(3).clamp(1200, 12000)
+}
+
+fn build_tool_history_compaction_messages(
+    source: &str,
+    keep_recent_rounds: usize,
+) -> Vec<ChatMessage> {
+    vec![
+        ChatMessage::system(
+            "You compact terminal-agent tool history for the next model call. Preserve only task-relevant facts, decisions, file paths, commands/outcomes, errors that changed behavior, and final artifacts. Do not preserve raw tool call JSON or full stdout/stderr. Write concise bullets. Return only the compacted history.",
+        ),
+        ChatMessage::user(format!(
+            "This compacted history will replace older assistant/tool messages. The latest {keep_recent_rounds} completed tool round(s), if any, will remain available separately.\n\nTool history to compact:\n{source}"
+        )),
+    ]
+}
+
+fn fit_tool_compaction_source_to_budget(
+    source: &str,
+    keep_recent_rounds: usize,
+    max_tokens: usize,
+) -> String {
+    let mut fitted = source.to_string();
+    loop {
+        let messages = build_tool_history_compaction_messages(&fitted, keep_recent_rounds);
+        if estimate_messages_breakdown(&messages).total() <= max_tokens {
+            return fitted;
+        }
+        let current_chars = fitted.chars().count();
+        if current_chars <= 256 {
+            return truncate(&fitted, current_chars.saturating_sub(1).max(1));
+        }
+        fitted = truncate(&fitted, current_chars.saturating_mul(3) / 4);
+    }
 }
 
 fn compacted_tool_history(messages: &[ChatMessage]) -> Option<String> {
@@ -1126,7 +1262,7 @@ fn is_tool_image_attachment_message(message: &ChatMessage) -> bool {
             .is_some_and(|content| content.starts_with("Attached image(s) from read_image:"))
 }
 
-fn compact_tool_round(
+fn tool_round_compaction_source(
     messages: &[ChatMessage],
     range: MessageRange,
     round_number: usize,
@@ -1139,23 +1275,23 @@ fn compact_tool_round(
                 tools.push(format!(
                     "{}({})",
                     call.function.name,
-                    truncate(&call.function.arguments, 160)
+                    truncate(&call.function.arguments, 800)
                 ));
             }
         } else if message.role == "tool" {
             let result = message.content_text().unwrap_or_default();
-            results.push(truncate(result, 320).replace('\n', " "));
+            results.push(truncate(result, 1600).replace('\n', " "));
         } else if is_tool_image_attachment_message(message) {
             results.push(message.content_text().unwrap_or_default().to_string());
         }
     }
 
-    let mut line = format!("- round {round_number}: tools={}", tools.join(", "));
+    let mut line = format!("round {round_number}\ntools: {}", tools.join(", "));
     if !results.is_empty() {
-        line.push_str("; results=");
-        line.push_str(&results.join(" | "));
+        line.push_str("\nresults:\n- ");
+        line.push_str(&results.join("\n- "));
     }
-    truncate(&line, 900)
+    truncate(&line, 2200)
 }
 
 pub async fn select_model(models: &ModelRegistry) -> anyhow::Result<ModelProfile> {
@@ -2604,7 +2740,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_history_compaction_keeps_recent_rounds() {
+    fn tool_history_compaction_with_summary_keeps_recent_rounds() {
         let mut messages = vec![
             ChatMessage::system("system"),
             ChatMessage::user("inspect files"),
@@ -2617,10 +2753,10 @@ mod tests {
             ));
         }
 
-        assert!(compact_tool_history_with_options(
+        assert!(compact_tool_history_with_summary(
             &mut messages,
             TOOL_ROUNDS_TO_KEEP,
-            6000
+            "- reviewed early tool results"
         ));
 
         let compacted = messages
@@ -2628,9 +2764,7 @@ mod tests {
             .filter_map(ChatMessage::content_text)
             .find(|content| content.starts_with(COMPACTED_TOOL_HISTORY_PREFIX))
             .unwrap();
-        assert!(compacted.contains("round 1"));
-        assert!(compacted.contains("large output from round 0"));
-        assert!(compacted.contains("large output from round 1"));
+        assert!(compacted.contains("reviewed early tool results"));
         assert!(!compacted.contains("large output from round 2"));
         assert!(!compacted.contains("large output from round 3"));
         assert_eq!(
@@ -2643,24 +2777,19 @@ mod tests {
     }
 
     #[test]
-    fn tool_chain_prepare_skips_below_threshold() {
-        let mut messages = vec![
+    fn tool_history_compaction_source_is_empty_when_no_rounds_can_be_compacted() {
+        let messages = vec![
             ChatMessage::system("system"),
             ChatMessage::user("inspect files"),
             tool_call_message(0),
             ChatMessage::tool("call_0", "small output"),
         ];
-        let original = messages.clone();
 
-        let preparation = prepare_tool_chain_next_request(&mut messages, &[], 4000).unwrap();
-
-        assert!(!preparation.compacted);
-        assert_eq!(preparation.before_tokens, preparation.after_tokens);
-        assert_eq!(messages, original);
+        assert!(tool_history_compaction_source(&messages, TOOL_ROUNDS_TO_KEEP, 4000).is_none());
     }
 
     #[test]
-    fn tool_chain_prepare_compacts_at_threshold() {
+    fn tool_history_compaction_source_includes_completed_old_rounds() {
         let mut messages = vec![
             ChatMessage::system("system"),
             ChatMessage::user("inspect files"),
@@ -2673,18 +2802,12 @@ mod tests {
             ));
         }
 
-        let preparation = prepare_tool_chain_next_request(&mut messages, &[], 1200).unwrap();
+        let source = tool_history_compaction_source(&messages, TOOL_ROUNDS_TO_KEEP, 1200).unwrap();
 
-        assert!(preparation.compacted);
-        assert!(preparation.retained_rounds.is_some());
-        assert!(preparation.after_tokens <= 1200);
-        assert!(
-            messages
-                .iter()
-                .filter_map(ChatMessage::content_text)
-                .any(|content| content.starts_with(COMPACTED_TOOL_HISTORY_PREFIX))
-        );
-        assert!(estimate_chat_request_breakdown(&messages, &[]).total() <= 1200);
+        assert!(source.contains("round 1"));
+        assert!(source.contains("large output"));
+        assert!(!source.contains("round 3"));
+        assert!(!source.contains("round 4"));
     }
 
     #[test]
@@ -2701,7 +2824,11 @@ mod tests {
             ));
         }
 
-        assert!(compact_tool_history_with_options(&mut messages, 0, 6000));
+        assert!(compact_tool_history_with_summary(
+            &mut messages,
+            0,
+            "- all tool rounds summarized"
+        ));
 
         assert_eq!(
             messages
@@ -2716,21 +2843,6 @@ mod tests {
                 .filter_map(ChatMessage::content_text)
                 .any(|content| content.starts_with(COMPACTED_TOOL_HISTORY_PREFIX))
         );
-    }
-
-    #[test]
-    fn tool_chain_prepare_errors_when_compacted_context_exceeds_budget() {
-        let mut messages = vec![
-            ChatMessage::system("system"),
-            ChatMessage::user("inspect files"),
-            tool_call_message(0),
-            ChatMessage::tool("call_0", "large output ".repeat(200)),
-        ];
-
-        let error = prepare_tool_chain_next_request(&mut messages, &[], 10).unwrap_err();
-
-        assert!(matches!(error, LlmError::Input(_)));
-        assert!(error.to_string().contains("context budget exceeded"));
     }
 
     fn tool_call_message(index: usize) -> ChatMessage {
