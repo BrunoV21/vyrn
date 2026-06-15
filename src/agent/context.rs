@@ -8,6 +8,7 @@ use crate::llm::{ChatCompletionRequest, LlmError, OpenAiClient};
 pub struct ContextManager {
     summary: Option<String>,
     previous_exchange: Option<Exchange>,
+    raw_history_tokens: usize,
     configured_aggressiveness: SummaryAggressiveness,
     max_tokens: usize,
 }
@@ -17,6 +18,7 @@ impl ContextManager {
         Self {
             summary: None,
             previous_exchange: None,
+            raw_history_tokens: 0,
             configured_aggressiveness,
             max_tokens,
         }
@@ -30,13 +32,19 @@ impl ContextManager {
         self.previous_exchange.as_ref()
     }
 
+    pub fn raw_history_tokens(&self) -> usize {
+        self.raw_history_tokens
+    }
+
     pub fn set_previous_exchange(&mut self, exchange: Exchange) {
+        self.raw_history_tokens += estimate_text_tokens(&exchange.compact(true));
         self.previous_exchange = Some(exchange);
     }
 
     pub fn clear(&mut self) {
         self.summary = None;
         self.previous_exchange = None;
+        self.raw_history_tokens = 0;
     }
 
     pub fn effective_aggressiveness(
@@ -97,23 +105,6 @@ impl ContextManager {
                 .unwrap_or(sent),
             breakdown,
         }))
-    }
-
-    pub fn estimate_would_be_tokens(
-        &self,
-        system: &str,
-        user_input: &str,
-        image_count: usize,
-    ) -> usize {
-        let mut total = estimate_text_tokens(system) + estimate_text_tokens(user_input);
-        total += image_count * 256;
-        if let Some(summary) = &self.summary {
-            total += estimate_text_tokens(summary);
-        }
-        if let Some(exchange) = &self.previous_exchange {
-            total += estimate_text_tokens(&exchange.compact(true));
-        }
-        total
     }
 }
 

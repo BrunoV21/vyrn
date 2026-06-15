@@ -231,6 +231,16 @@ pub fn estimate_chat_request_tokens(messages: &[ChatMessage], tools: &[Value]) -
     estimate_chat_request_breakdown(messages, tools).total()
 }
 
+pub fn estimate_unpruned_request_tokens(
+    request_breakdown: &TokenBreakdown,
+    raw_history_tokens: usize,
+) -> usize {
+    request_breakdown
+        .total()
+        .saturating_sub(request_breakdown.summaries)
+        + raw_history_tokens
+}
+
 pub fn estimate_messages_breakdown(messages: &[ChatMessage]) -> TokenBreakdown {
     let mut breakdown = TokenBreakdown::default();
     let mut skill_tool_call_ids = BTreeSet::new();
