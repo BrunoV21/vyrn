@@ -1,8 +1,13 @@
 use vyrn::agent::tokens::TokenLedger;
-use vyrn::agent::tokens::{TokenBreakdown, TurnUsage, estimate_chat_request_breakdown};
+use vyrn::agent::tokens::{
+    TokenBreakdown, TurnUsage, estimate_chat_request_breakdown, estimate_messages_breakdown,
+    estimate_unpruned_request_tokens,
+};
+use vyrn::agent::transcript::Exchange;
 use vyrn::config::SummaryAggressiveness;
 use vyrn::llm::types::ToolCallFunction;
 use vyrn::llm::{ChatMessage, ImageAttachment, ToolCall};
+use vyrn::tools::ToolResult;
 
 #[test]
 fn context_aggressiveness_escalates_near_budget() {
@@ -20,6 +25,27 @@ fn context_aggressiveness_escalates_near_budget() {
         context.effective_aggressiveness(95),
         SummaryAggressiveness::High
     );
+}
+
+#[test]
+fn context_tracks_raw_history_tokens_until_clear() {
+    let mut context = vyrn::agent::context::ContextManager::new(1000, SummaryAggressiveness::Low);
+    assert_eq!(context.raw_history_tokens(), 0);
+
+    context.set_previous_exchange(Exchange {
+        user_input: "read the file".to_string(),
+        assistant_text: "I read it.".to_string(),
+        tool_calls: Vec::new(),
+        tool_results: vec![ToolResult::text("read_file", "important file contents")],
+    });
+
+    assert!(context.raw_history_tokens() > 0);
+    assert!(context.previous_exchange().is_some());
+
+    context.clear();
+
+    assert_eq!(context.raw_history_tokens(), 0);
+    assert!(context.previous_exchange().is_none());
 }
 
 #[test]
@@ -46,6 +72,64 @@ fn token_ledger_accumulates_savings() {
     assert_eq!(ledger.turns[0].breakdown.system_prompt, 20);
     assert_eq!(ledger.turns[0].breakdown.user_requests, 30);
     assert_eq!(ledger.turns[0].breakdown.tool_schemas, 50);
+}
+
+#[test]
+fn unpruned_request_tokens_replace_summary_with_raw_history() {
+    let messages = vec![
+        ChatMessage::system("[role] terminal agent"),
+        ChatMessage::system("[summary]\nEdited src/lib.rs"),
+        ChatMessage::user("continue"),
+    ];
+    let breakdown = estimate_messages_breakdown(&messages);
+    let raw_history_tokens = breakdown.summaries + 25;
+
+    let would_be = estimate_unpruned_request_tokens(&breakdown, raw_history_tokens);
+
+    assert_eq!(
+        would_be,
+        breakdown.total() - breakdown.summaries + raw_history_tokens
+    );
+    assert!(would_be > breakdown.total());
+}
+
+#[test]
+fn unpruned_request_tokens_keep_current_turn_tool_history() {
+    let first_round = vec![
+        ChatMessage::system("[role] terminal agent"),
+        ChatMessage::system("[summary]\nPrevious summarized work"),
+        ChatMessage::user("inspect src/lib.rs"),
+    ];
+    let second_round = vec![
+        ChatMessage::system("[role] terminal agent"),
+        ChatMessage::system("[summary]\nPrevious summarized work"),
+        ChatMessage::user("inspect src/lib.rs"),
+        ChatMessage::assistant_tool_calls(
+            String::new(),
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                kind: "function".to_string(),
+                function: ToolCallFunction {
+                    name: "read_file".to_string(),
+                    arguments: r#"{"path":"src/lib.rs"}"#.to_string(),
+                },
+            }],
+        ),
+        ChatMessage::tool("call_1", "large tool output that belongs to this turn"),
+    ];
+    let first_breakdown = estimate_messages_breakdown(&first_round);
+    let second_breakdown = estimate_messages_breakdown(&second_round);
+    let raw_history_tokens = first_breakdown.summaries + 10;
+
+    let first_would_be = estimate_unpruned_request_tokens(&first_breakdown, raw_history_tokens);
+    let second_would_be = estimate_unpruned_request_tokens(&second_breakdown, raw_history_tokens);
+
+    assert!(second_breakdown.total() > first_breakdown.total());
+    assert!(second_would_be > first_would_be);
+    assert_eq!(
+        second_would_be,
+        second_breakdown.total() - second_breakdown.summaries + raw_history_tokens
+    );
 }
 
 #[test]
