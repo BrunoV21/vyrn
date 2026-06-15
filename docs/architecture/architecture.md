@@ -368,9 +368,9 @@ pub struct TurnUsage {
 }
 ```
 
-`sent` is measured from the actual request payload when possible. If the API returns
-usage, prefer provider usage for completed non-streaming calls and fall back to local
-estimation for streaming calls or providers that omit usage.
+`sent` is the ledger's measured/estimated token cost for the call. It includes
+request input plus completion output when provider usage is available, and falls
+back to local estimation when providers omit usage.
 
 `would_be` is an estimate of sending the full transcript without summary pruning:
 
@@ -385,7 +385,7 @@ replaceable because tokenization differs across OpenAI-compatible endpoints.
 Update the composer status row after each completed request:
 
 ```text
-turn sent: 812 | turn saved: 3,204 | session saved: 11,847 | context: 1,024/4,096
+turn spent: 812 | turn saved: 3,204 | session saved: 11,847 | context: 1,024/4,096
 ```
 
 In `--verbose`, print per-call usage and the current summary.

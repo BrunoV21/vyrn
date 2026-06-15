@@ -308,9 +308,9 @@ When the context budget is tight (approaching `max_tokens`), vyrn automatically 
 vyrn tracks token usage across every call:
 
 ```
-tokens_sent      = actual tokens in the request (measured)
+tokens_spent     = request input tokens plus known or estimated output tokens
 tokens_would_be  = tokens if full history were sent (estimated)
-tokens_saved     = tokens_would_be - tokens_sent
+tokens_saved     = tokens_would_be - tokens_spent
 ```
 
 This is tracked per-request and accumulated as a session total.
@@ -349,7 +349,7 @@ LLM responses stream token by token directly to the terminal as they are returne
 After each completed request, vyrn displays a compact stats line:
 
 ```
-✓  turn sent: 812  |  turn saved: 3,204  |  session saved: 11,847
+✓  turn spent: 812  |  turn saved: 3,204  |  session saved: 11,847
 ```
 
 This is a permanent fixture in the UI — not hidden, not optional. It is a core part of the product identity.

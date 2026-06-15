@@ -36,7 +36,7 @@ model llama3  context 4096
 
 > inspect this package and suggest the next implementation step
 • I will read the package files and summarize the current state...
-turn sent: 812 | turn saved: 3,204 | session saved: 11,847 | context: 1,024/4,096
+turn spent: 812 | turn saved: 3,204 | session saved: 11,847 | context: 1,024/4,096
 ```
 
 Use `/exit` to close the session.

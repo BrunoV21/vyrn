@@ -40,7 +40,7 @@ The interactive interface uses native terminal scrollback with `crossterm` raw-m
 - **Raw power primitive:** `batch` is the main extension point for shell work, installs, scripts, and host inspection.
 - **Terminal UI:** real terminal sessions use a styled native-scrollback chat surface instead of a bare line prompt.
 - **Rolling summaries:** conversation history is compressed into a living summary instead of resent wholesale on every turn.
-- **Visible savings:** each completed request reports tokens sent, tokens saved, session saved, and current context footprint.
+- **Visible savings:** each completed request reports tokens spent, tokens saved, session saved, and current context footprint.
 - **Open standards:** skills follow Agent Skills protocol, and MCP config follows `.mcp.json` conventions.
 
 ## Installation
@@ -103,7 +103,7 @@ The composer status row under the input box shows request tokens, savings, sessi
 and the current prompt footprint against the configured context window:
 
 ```text
-turn sent: 225 | turn saved: 29 | session saved: 18 | context: 342/4,096
+turn spent: 225 | turn saved: 29 | session saved: 18 | context: 342/4,096
 ```
 
 Press `Esc` while a turn is running to cancel it and return to the composer. Press
