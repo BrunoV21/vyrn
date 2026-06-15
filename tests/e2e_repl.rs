@@ -4,6 +4,8 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tempfile::tempdir;
+use vyrn::agent::tokens::estimate_chat_request_breakdown;
+use vyrn::llm::ChatMessage;
 
 #[test]
 fn repl_runs_against_openai_compatible_streaming_server() {
@@ -230,6 +232,15 @@ api_key = ""
             .any(|request| request.contains("[compacted tool history]")),
         "{requests:#?}"
     );
+    assert!(
+        !requests[0].contains("[compacted tool history]"),
+        "{}",
+        requests[0]
+    );
+    for request in requests.iter().skip(1) {
+        let estimate = estimate_request_tokens(request);
+        assert!(estimate <= 1200, "estimate={estimate}\n{request}");
+    }
 }
 
 #[test]
@@ -414,6 +425,17 @@ fn read_http_body(stream: &mut TcpStream) -> String {
     }
 
     String::from_utf8_lossy(&buffer[header_end..header_end + content_length]).to_string()
+}
+
+fn estimate_request_tokens(body: &str) -> usize {
+    let value: serde_json::Value = serde_json::from_str(body).unwrap();
+    let messages = serde_json::from_value::<Vec<ChatMessage>>(value["messages"].clone()).unwrap();
+    let tools = value
+        .get("tools")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    estimate_chat_request_breakdown(&messages, &tools).total()
 }
 
 fn write_sse(stream: &mut TcpStream, event: &str) {
