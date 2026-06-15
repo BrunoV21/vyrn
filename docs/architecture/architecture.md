@@ -385,7 +385,7 @@ replaceable because tokenization differs across OpenAI-compatible endpoints.
 Update the composer status row after each completed request:
 
 ```text
-tokens sent: 812 | saved: 3,204 | session saved: 11,847 | context: 1,024/4,096
+turn sent: 812 | turn saved: 3,204 | session saved: 11,847 | context: 1,024/4,096
 ```
 
 In `--verbose`, print per-call usage and the current summary.

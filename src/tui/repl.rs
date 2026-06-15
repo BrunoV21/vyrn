@@ -1,6 +1,7 @@
 use crate::agent::prompt::build_agent_prompt;
 use crate::agent::tokens::{
     TokenBreakdown, TokenLedger, TurnUsage, estimate_chat_request_breakdown,
+    estimate_unpruned_request_tokens,
 };
 use crate::agent::transcript::{Exchange, truncate};
 use crate::app::App;
@@ -459,11 +460,6 @@ impl Repl {
             &user_input.text,
             &images,
         );
-        let would_be = self.app.context.estimate_would_be_tokens(
-            &prompt.system,
-            &user_input.text,
-            images.len(),
-        );
         usage.context_tokens = prompt.estimated_tokens.tokens;
         let mut messages = prompt.messages;
         let mut assistant_text = String::new();
@@ -475,10 +471,14 @@ impl Repl {
             let tool_schemas = self.app.tools.schemas();
             let request_breakdown = estimate_chat_request_breakdown(&messages, &tool_schemas);
             let sent = request_breakdown.total();
+            let would_be = estimate_unpruned_request_tokens(
+                &request_breakdown,
+                self.app.context.raw_history_tokens(),
+            );
             usage.add_call_with_breakdown(
                 format!("agent-{round}"),
                 sent,
-                would_be + request_breakdown.tool_schemas,
+                would_be,
                 request_breakdown,
             );
 
@@ -656,7 +656,7 @@ impl Repl {
     fn full_stats_text(&self) -> String {
         let current_context = self.current_context_tokens();
         let mut text = format!(
-            "session sent: {} | would_be: {} | saved: {} | context: {}/{}",
+            "session sent: {} | session would be: {} | session saved: {} | context: {}/{}",
             self.app.stats.session_sent,
             self.app.stats.session_would_be,
             self.app.stats.session_saved,
@@ -714,7 +714,7 @@ impl Repl {
             return self.composer_status_line();
         };
         format!(
-            "tokens sent: {} | saved: {} | session saved: {} | context: {}/{}",
+            "turn sent: {} | turn saved: {} | session saved: {} | context: {}/{}",
             crate::tui::render::format_number(turn.sent as isize),
             crate::tui::render::format_number(turn.saved),
             crate::tui::render::format_number(self.app.stats.session_saved),
@@ -1248,17 +1248,17 @@ fn print_stats_panel(
     print_stats_line(&[(String::from("stats"), VY_VIOLET)])?;
 
     print_stats_line(&[
-        (String::from("sent "), VY_TEXT_MUTED),
+        (String::from("session sent "), VY_TEXT_MUTED),
         (
             crate::tui::render::format_number(ledger.session_sent as isize),
             VY_TECH_STRONG,
         ),
-        (String::from("  would be "), VY_TEXT_MUTED),
+        (String::from("  session would be "), VY_TEXT_MUTED),
         (
             crate::tui::render::format_number(ledger.session_would_be as isize),
             VY_TECH_STRONG,
         ),
-        (String::from("  saved "), VY_TEXT_MUTED),
+        (String::from("  session saved "), VY_TEXT_MUTED),
         (
             crate::tui::render::format_number(ledger.session_saved),
             if ledger.session_saved >= 0 {

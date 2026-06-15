@@ -24,7 +24,7 @@ and message overhead.
 After each completed request, update the compact composer status row:
 
 ```text
-tokens sent: 812 | saved: 3,204 | session saved: 11,847 | context: 1,024/4,096
+turn sent: 812 | turn saved: 3,204 | session saved: 11,847 | context: 1,024/4,096
 ```
 
 The status row should be visible by default in the typing zone. It is part of how users understand that vyrn is behaving differently from large-context agents.

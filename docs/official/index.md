@@ -42,7 +42,7 @@ features:
 model llama3 context 4096<br>
 <br>
 &gt; summarize this repo and find the next implementation step<br>
-<span class="ok">tokens sent: 812 | saved: 3,204 | session saved: 11,847 | context: 1,024/4,096</span>
+<span class="ok">turn sent: 812 | turn saved: 3,204 | session saved: 11,847 | context: 1,024/4,096</span>
 </div>
 
 ## The idea

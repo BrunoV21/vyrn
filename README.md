@@ -103,7 +103,7 @@ The composer status row under the input box shows request tokens, savings, sessi
 and the current prompt footprint against the configured context window:
 
 ```text
-tokens sent: 225 | saved: 29 | session saved: 18 | context: 342/4,096
+turn sent: 225 | turn saved: 29 | session saved: 18 | context: 342/4,096
 ```
 
 Press `Esc` while a turn is running to cancel it and return to the composer. Press
