@@ -221,15 +221,25 @@ fn repl_compacts_tool_history_and_continues_past_eight_rounds() {
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let server_bodies = Arc::clone(&bodies);
     let server = thread::spawn(move || {
-        for index in 0..11 {
+        let mut agent_index = 0;
+        while agent_index < 11 {
             let (mut stream, _) = listener.accept().unwrap();
             let body = read_http_body(&mut stream);
-            server_bodies.lock().unwrap().push(body);
-            if index < 10 {
+            server_bodies.lock().unwrap().push(body.clone());
+            if body.contains("compact terminal-agent tool history")
+                || body.contains("Tool history to compact")
+            {
+                write_json(
+                    &mut stream,
+                    r#"{"choices":[{"message":{"role":"assistant","content":"- Summarized earlier fixture reads and retained the fact that fixture.txt returned repeated x characters."}}],"usage":{"prompt_tokens":120,"completion_tokens":24,"total_tokens":144}}"#,
+                );
+                continue;
+            }
+            if agent_index < 10 {
                 write_sse(
                     &mut stream,
                     &format!(
-                        r#"data: {{"choices":[{{"delta":{{"tool_calls":[{{"index":0,"id":"call_read_{index}","type":"function","function":{{"name":"read_file","arguments":"{{\"path\":\"fixture.txt\"}}"}}}}]}}}}]}}"#
+                        r#"data: {{"choices":[{{"delta":{{"tool_calls":[{{"index":0,"id":"call_read_{agent_index}","type":"function","function":{{"name":"read_file","arguments":"{{\"path\":\"fixture.txt\"}}"}}}}]}}}}]}}"#
                     ),
                 );
             } else {
@@ -238,6 +248,7 @@ fn repl_compacts_tool_history_and_continues_past_eight_rounds() {
                     r#"data: {"choices":[{"delta":{"content":"Finished after many tools."}}]}"#,
                 );
             }
+            agent_index += 1;
         }
     });
 
@@ -282,19 +293,29 @@ api_key = ""
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Finished after many tools."), "{stdout}");
     let requests = bodies.lock().unwrap();
-    assert_eq!(requests.len(), 11);
+    let agent_requests = requests
+        .iter()
+        .filter(|request| request.contains(r#""stream":true"#))
+        .collect::<Vec<_>>();
+    assert_eq!(agent_requests.len(), 11);
     assert!(
-        requests
+        agent_requests
             .iter()
             .any(|request| request.contains("[compacted tool history]")),
         "{requests:#?}"
     );
     assert!(
-        !requests[0].contains("[compacted tool history]"),
+        !agent_requests[0].contains("[compacted tool history]"),
         "{}",
-        requests[0]
+        agent_requests[0]
     );
-    for request in requests.iter().skip(1) {
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.contains("Tool history to compact")),
+        "{requests:#?}"
+    );
+    for request in agent_requests.into_iter().skip(1) {
         let estimate = estimate_request_tokens(request);
         assert!(estimate <= 1200, "estimate={estimate}\n{request}");
     }
