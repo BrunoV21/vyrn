@@ -67,7 +67,7 @@ api_key = ""
     assert!(stdout.contains("> using llama3 @"));
     assert!(stdout.contains("[read_file ok]"));
     assert!(stdout.contains("I read fixture.txt: hello from e2e."));
-    assert!(stdout.contains("tokens sent:"));
+    assert!(stdout.contains("turn sent:"));
 }
 
 #[test]
@@ -133,6 +133,7 @@ api_key = ""
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("session sent"), "{stdout}");
     assert!(stdout.contains("contributors:"), "{stdout}");
     assert!(stdout.contains("tools:"), "{stdout}");
     assert!(stdout.contains("skills:"), "{stdout}");
