@@ -1,28 +1,28 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 360" role="img" aria-label="vyrn - token-efficient Rust CLI agent">
   <defs>
     <linearGradient id="edge" x1="0" x2="1" y1="0" y2="1">
-      <stop offset="0" stop-color="#a855f7"/>
-      <stop offset="0.5" stop-color="#22d3ee"/>
-      <stop offset="1" stop-color="#a3e635"/>
+      <stop offset="0" stop-color="#8b5cf6"/>
+      <stop offset="0.5" stop-color="#7da2c2"/>
+      <stop offset="1" stop-color="#a78bfa"/>
     </linearGradient>
     <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
-      <path d="M28 0H0v28" fill="none" stroke="#181429" stroke-width="1"/>
+      <path d="M28 0H0v28" fill="none" stroke="#151a22" stroke-width="1"/>
     </pattern>
   </defs>
-  <rect width="1400" height="360" fill="#05030a"/>
+  <rect width="1400" height="360" fill="#06070a"/>
   <rect width="1400" height="360" fill="url(#grid)" opacity="0.8"/>
-  <rect x="28" y="28" width="1344" height="304" fill="none" stroke="#2a2238" stroke-width="2"/>
-  <rect x="46" y="46" width="1308" height="268" fill="#0b0814" opacity="0.88" stroke="#4b3b67"/>
+  <rect x="28" y="28" width="1344" height="304" fill="none" stroke="#273142" stroke-width="2"/>
+  <rect x="46" y="46" width="1308" height="268" fill="#0d1016" opacity="0.9" stroke="#3a475e"/>
   <g font-family="JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, monospace">
-    <text x="90" y="142" fill="#a855f7" font-size="78" font-weight="700" letter-spacing="0">vyrn</text>
-    <text x="92" y="196" fill="#f7f2ff" font-size="28" font-weight="600">token-efficient Rust CLI agent</text>
-    <text x="92" y="242" fill="#a79bbe" font-size="22">small context first / OpenAI-compatible / local-model ready</text>
+    <text x="90" y="142" fill="#8b5cf6" font-size="78" font-weight="700" letter-spacing="0">vyrn</text>
+    <text x="92" y="196" fill="#f3f7fb" font-size="28" font-weight="600">token-efficient Rust CLI agent</text>
+    <text x="92" y="242" fill="#98a3b3" font-size="22">small context first / OpenAI-compatible / local-model ready</text>
     <g transform="translate(925 94)" font-size="18">
-      <rect x="0" y="0" width="350" height="178" fill="#030207" stroke="#2a2238"/>
-      <text x="24" y="42" fill="#22d3ee">$ vyrn --models</text>
-      <text x="24" y="78" fill="#f7f2ff">&gt; manifest: git,curl,cargo</text>
-      <text x="24" y="114" fill="#a3e635">&gt; saved: 3,204 tokens</text>
-      <text x="24" y="150" fill="#a79bbe">&gt; context: 4096</text>
+      <rect x="0" y="0" width="350" height="178" fill="#06070a" stroke="#273142"/>
+      <text x="24" y="42" fill="#7da2c2">$ vyrn --models</text>
+      <text x="24" y="78" fill="#f3f7fb">&gt; manifest: git,curl,cargo</text>
+      <text x="24" y="114" fill="#9fe870">&gt; saved: 3,204 tokens</text>
+      <text x="24" y="150" fill="#98a3b3">&gt; context: 4096</text>
     </g>
   </g>
   <path d="M46 314H1354" stroke="url(#edge)" stroke-width="4"/>

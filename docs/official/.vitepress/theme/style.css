@@ -1,19 +1,20 @@
-/* Vyrn Docs - Terminal Violet brutalist theme */
+/* Vyrn Docs - Terminal Violet + steel-blue theme */
 
 :root {
-  --vy-bg: #05030a;
-  --vy-surface: #0b0814;
-  --vy-surface-raised: #12101f;
-  --vy-border: #2a2238;
-  --vy-border-hover: #4b3b67;
-  --vy-text-primary: #f7f2ff;
-  --vy-text-muted: #a79bbe;
-  --vy-text-dim: #625774;
-  --vy-violet: #a855f7;
-  --vy-violet-hover: #c084fc;
+  --vy-bg: #06070a;
+  --vy-surface: #0d1016;
+  --vy-surface-raised: #151a22;
+  --vy-border: #273142;
+  --vy-border-hover: #3a475e;
+  --vy-text-primary: #f3f7fb;
+  --vy-text-muted: #98a3b3;
+  --vy-text-dim: #677287;
+  --vy-violet: #8b5cf6;
+  --vy-violet-hover: #a78bfa;
   --vy-violet-active: #7c3aed;
-  --vy-cyan: #22d3ee;
-  --vy-lime: #a3e635;
+  --vy-tech: #7da2c2;
+  --vy-tech-strong: #a9bdd3;
+  --vy-success: #9fe870;
   --vy-amber: #f59e0b;
   --vy-red: #f43f5e;
   --vy-font: 'JetBrains Mono', ui-monospace, 'Cascadia Code', monospace;
@@ -36,10 +37,10 @@
   --vp-c-brand-2: var(--vy-violet-hover);
   --vp-c-brand-3: var(--vy-violet-active);
   --vp-c-brand-soft: rgba(168, 85, 247, 0.14);
-  --vp-c-tip-1: var(--vy-lime);
+  --vp-c-tip-1: var(--vy-success);
   --vp-c-tip-2: #84cc16;
   --vp-c-tip-3: #65a30d;
-  --vp-c-tip-soft: rgba(163, 230, 53, 0.12);
+  --vp-c-tip-soft: rgba(159, 232, 112, 0.12);
   --vp-c-warning-1: var(--vy-amber);
   --vp-c-warning-2: #d97706;
   --vp-c-warning-3: #b45309;
@@ -49,9 +50,9 @@
   --vp-c-danger-3: #be123c;
   --vp-c-danger-soft: rgba(244, 63, 94, 0.12);
   --vp-code-block-bg: var(--vy-surface);
-  --vp-code-line-highlight-color: rgba(34, 211, 238, 0.08);
+  --vp-code-line-highlight-color: rgba(125, 162, 194, 0.08);
   --vp-code-copy-code-bg: var(--vy-surface-raised);
-  --vp-code-copy-code-hover-bg: #181429;
+  --vp-code-copy-code-hover-bg: #1a202b;
   --vp-font-family-base: var(--vy-font);
   --vp-font-family-mono: var(--vy-font);
 }
@@ -210,8 +211,8 @@ html {
 
 .VPFeature .icon,
 .VPFeature .icon svg {
-  color: var(--vy-cyan) !important;
-  stroke: var(--vy-cyan) !important;
+  color: var(--vy-tech) !important;
+  stroke: var(--vy-tech) !important;
 }
 
 .VPFeature .title {
@@ -247,7 +248,7 @@ html {
 }
 
 .vp-doc h3 {
-  color: var(--vy-cyan) !important;
+  color: var(--vy-tech) !important;
 }
 
 .vp-doc a {
@@ -273,7 +274,7 @@ html {
 .vp-doc code {
   border: 1px solid var(--vy-border) !important;
   background: var(--vy-surface) !important;
-  color: var(--vy-cyan) !important;
+  color: var(--vy-tech) !important;
   font-family: var(--vy-font) !important;
   font-size: 12px !important;
   padding: 1px 5px !important;
@@ -334,7 +335,7 @@ html {
 }
 
 .vp-doc .custom-block.tip {
-  border-color: rgba(163, 230, 53, 0.4) !important;
+  border-color: rgba(159, 232, 112, 0.4) !important;
 }
 
 .vp-doc .custom-block.warning {
@@ -384,11 +385,11 @@ html {
 }
 
 .vy-terminal .grid {
-  color: var(--vy-cyan);
+  color: var(--vy-tech);
 }
 
 .vy-terminal .ok {
-  color: var(--vy-lime);
+  color: var(--vy-success);
 }
 
 .agent-docs-banner {
@@ -406,7 +407,7 @@ html {
 }
 
 .agent-docs-banner__label {
-  color: var(--vy-lime);
+  color: var(--vy-violet);
   font-family: var(--vy-font);
   font-size: 11px;
   font-weight: 800;
@@ -421,8 +422,8 @@ html {
 }
 
 .agent-docs-banner a {
-  border: 1px solid var(--vy-cyan);
-  color: var(--vy-cyan);
+  border: 1px solid var(--vy-tech);
+  color: var(--vy-tech);
   font-family: var(--vy-font);
   font-size: 11px;
   font-weight: 800;
@@ -433,7 +434,7 @@ html {
 }
 
 .agent-docs-banner a:hover {
-  background: rgba(34, 211, 238, 0.1);
+  background: rgba(125, 162, 194, 0.1);
   color: var(--vy-text-primary);
 }
 
@@ -443,7 +444,7 @@ html {
 
 .raw-markdown-link a {
   border: 1px solid var(--vy-border);
-  color: var(--vy-cyan);
+  color: var(--vy-tech);
   display: inline-flex;
   font-family: var(--vy-font);
   font-size: 11px;
@@ -455,8 +456,8 @@ html {
 }
 
 .raw-markdown-link a:hover {
-  border-color: var(--vy-cyan);
-  background: rgba(34, 211, 238, 0.08);
+  border-color: var(--vy-tech);
+  background: rgba(125, 162, 194, 0.08);
   color: var(--vy-text-primary);
 }
 
