@@ -1,4 +1,5 @@
 use crate::llm::{ChatMessage, ContentPart, MessageContent};
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -7,7 +8,7 @@ pub struct TokenEstimate {
     pub tokens: usize,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TokenLedger {
     pub session_sent: usize,
     pub session_would_be: usize,
@@ -15,7 +16,7 @@ pub struct TokenLedger {
     pub turns: Vec<TurnUsage>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TurnUsage {
     pub sent: usize,
     pub would_be: usize,
@@ -25,7 +26,7 @@ pub struct TurnUsage {
     pub calls: Vec<CallUsage>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct CallUsage {
     pub label: String,
     pub sent: usize,
@@ -33,7 +34,7 @@ pub struct CallUsage {
     pub breakdown: TokenBreakdown,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct TokenBreakdown {
     pub system_prompt: usize,
     pub summaries: usize,
@@ -51,7 +52,7 @@ pub struct TokenBreakdown {
     pub other: usize,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct BreakdownItem {
     pub label: &'static str,
     pub tokens: usize,

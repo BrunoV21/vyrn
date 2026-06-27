@@ -3,3 +3,4 @@ pub mod r#loop;
 pub mod prompt;
 pub mod tokens;
 pub mod transcript;
+pub mod turn;
