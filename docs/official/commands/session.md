@@ -16,8 +16,9 @@ cargo run --
 
 In a real terminal, `vyrn` starts a styled native-scrollback chat UI with raw-mode
 keyboard input. It keeps normal terminal scrollback, streams model output live, supports
-Tab completion for slash commands, and provides inline `/models` selection. When stdin
-or stdout is not a TTY, it falls back to the plain text prompt for scripts and tests.
+live slash-command completion with `Tab` acceptance, and provides inline `/models`
+selection. When stdin or stdout is not a TTY, it falls back to the plain text
+prompt for scripts and tests.
 Vision-capable models can receive images in the current message through `Ctrl+V`
 clipboard image paste or by mentioning image file paths in the prompt.
 While a turn is running, press `Esc` to cancel it and return to the composer. In

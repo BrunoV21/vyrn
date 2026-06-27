@@ -2,7 +2,10 @@
 
 Slash commands are available inside an active interactive session.
 
-In a real terminal, type `/` and press `Tab` to autocomplete slash commands.
+In a real terminal, type `/` to show the active slash-command completion next to
+the text you have typed. Press `Tab` to accept the shown command without running
+it. Press `Enter` to run the accepted command, or to run the shown completion
+when the typed prefix is incomplete.
 
 ## `/models`
 

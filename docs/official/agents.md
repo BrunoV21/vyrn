@@ -45,6 +45,7 @@ vyrn --models
 
 - [Session options](https://raw.githubusercontent.com/BrunoV21/vyrn/main/docs/official/commands/session.md)
 - [Slash commands](https://raw.githubusercontent.com/BrunoV21/vyrn/main/docs/official/commands/slash-commands.md)
+- [Agent evals](https://raw.githubusercontent.com/BrunoV21/vyrn/main/docs/official/commands/eval.md)
 
 ## Concepts
 

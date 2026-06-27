@@ -12,3 +12,4 @@ docs/official/.vitepress/dist/
 .vyrn/history.json
 .vyrn/models.toml
 .vyrn/state.toml
+.vyrn/eval-runs/
