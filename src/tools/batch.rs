@@ -6,6 +6,9 @@ use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
 const COMMAND_TIMEOUT_SECONDS: u64 = 120;
+const COMMAND_STREAM_LIMIT_CHARS: usize = 8000;
+const BATCH_STREAM_TOTAL_LIMIT_CHARS: usize = 16_000;
+const MIN_COMMAND_STREAM_LIMIT_CHARS: usize = 120;
 
 pub struct BatchTool;
 
@@ -54,9 +57,10 @@ impl Tool for BatchTool {
                 message: error.to_string(),
             })?;
 
+        let stream_limit = batch_stream_limit(input.commands.len());
         let mut results = Vec::with_capacity(input.commands.len());
         for command in input.commands {
-            results.push(run_command(command).await?);
+            results.push(run_command(command, stream_limit).await?);
         }
 
         let content =
@@ -69,7 +73,16 @@ impl Tool for BatchTool {
     }
 }
 
-async fn run_command(command: String) -> Result<BatchCommandResult, ToolError> {
+fn batch_stream_limit(command_count: usize) -> usize {
+    let stream_count = command_count.saturating_mul(2).max(1);
+    let limit = BATCH_STREAM_TOTAL_LIMIT_CHARS / stream_count;
+    limit.clamp(MIN_COMMAND_STREAM_LIMIT_CHARS, COMMAND_STREAM_LIMIT_CHARS)
+}
+
+async fn run_command(
+    command: String,
+    stream_limit: usize,
+) -> Result<BatchCommandResult, ToolError> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut child = Command::new(shell);
     child.arg("-lc").arg(&command);
@@ -91,8 +104,26 @@ async fn run_command(command: String) -> Result<BatchCommandResult, ToolError> {
     Ok(BatchCommandResult {
         command,
         status: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        stdout: trim_stream(&String::from_utf8_lossy(&output.stdout), stream_limit),
+        stderr: trim_stream(&String::from_utf8_lossy(&output.stderr), stream_limit),
         timed_out: false,
     })
+}
+
+fn trim_stream(value: &str, stream_limit: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= stream_limit {
+        return value.to_string();
+    }
+    let head_chars = stream_limit / 2;
+    let tail_chars = stream_limit - head_chars;
+    let head = value.chars().take(head_chars).collect::<String>();
+    let tail = value
+        .chars()
+        .skip(char_count.saturating_sub(tail_chars))
+        .collect::<String>();
+    format!(
+        "{head}\n[trimmed {} chars from batch output]\n{tail}",
+        char_count - stream_limit
+    )
 }

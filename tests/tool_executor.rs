@@ -72,6 +72,45 @@ async fn batch_continues_after_failed_command() {
 }
 
 #[tokio::test]
+async fn batch_trims_huge_stdout_and_stderr() {
+    let tools = ToolRegistry::core();
+    let result = tools
+        .execute(
+            "batch",
+            json!({
+                "commands": [
+                    "python3 -c 'import sys; print(\"A\" * 12000); print(\"B\" * 12000, file=sys.stderr)'"
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert!(result.content.contains("[trimmed "));
+    assert!(result.content.contains("chars from batch output"));
+    assert!(result.content.len() < 18_000, "{}", result.content.len());
+}
+
+#[tokio::test]
+async fn batch_shares_output_budget_across_many_noisy_commands() {
+    let tools = ToolRegistry::core();
+    let noisy =
+        "python3 -c 'import sys; print(\"A\" * 12000); print(\"B\" * 12000, file=sys.stderr)'";
+    let result = tools
+        .execute(
+            "batch",
+            json!({
+                "commands": [noisy, noisy, noisy, noisy]
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.content.matches("chars from batch output").count(), 8);
+    assert!(result.content.len() < 24_000, "{}", result.content.len());
+}
+
+#[tokio::test]
 async fn read_image_attaches_base64_images() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("sample.png");
