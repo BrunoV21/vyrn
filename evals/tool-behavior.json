@@ -1,0 +1,84 @@
+{
+  "name": "tool-behavior",
+  "cases": [
+    {
+      "id": "write-then-edit",
+      "description": "The agent should create a file, edit one exact string, and report completion.",
+      "prompt": "Use write_file to create .vyrn/eval-runs/edit-target.txt with exactly: status=PENDING. Then use edit_file to replace PENDING with COMPLETE in that file. After edit_file succeeds, reply with exactly VYRN_EDIT_DONE.",
+      "max_turns": 8,
+      "assertions": [
+        {
+          "type": "assistant_contains",
+          "value": "VYRN_EDIT_DONE"
+        },
+        {
+          "type": "tool_called_at_least",
+          "name": "write_file",
+          "count": 1
+        },
+        {
+          "type": "tool_called_at_least",
+          "name": "edit_file",
+          "count": 1
+        },
+        {
+          "type": "file_contains",
+          "path": ".vyrn/eval-runs/edit-target.txt",
+          "value": "status=COMPLETE"
+        },
+        {
+          "type": "assistant_not_contains",
+          "value": "PENDING"
+        }
+      ]
+    },
+    {
+      "id": "batch-side-effect",
+      "description": "The agent should use batch to create a file, and a deterministic command assertion verifies the side effect.",
+      "prompt": "Use the batch tool exactly once to run: printf VYRN_BATCH_FILE_MARKER_2026 > .vyrn/eval-runs/batch-created.txt. After the command succeeds, reply with exactly VYRN_BATCH_FILE_MARKER_2026.",
+      "max_turns": 6,
+      "assertions": [
+        {
+          "type": "assistant_contains",
+          "value": "VYRN_BATCH_FILE_MARKER_2026"
+        },
+        {
+          "type": "tool_called",
+          "name": "batch"
+        },
+        {
+          "type": "command_succeeds",
+          "command": "test \"$(cat .vyrn/eval-runs/batch-created.txt)\" = \"VYRN_BATCH_FILE_MARKER_2026\""
+        }
+      ]
+    },
+    {
+      "id": "direct-no-tool",
+      "description": "The agent should follow a no-tool instruction for a direct answer.",
+      "prompt": "Do not use any tools. Reply with exactly VYRN_NO_TOOL_DONE.",
+      "max_turns": 3,
+      "assertions": [
+        {
+          "type": "assistant_contains",
+          "value": "VYRN_NO_TOOL_DONE"
+        },
+        {
+          "type": "tool_not_called",
+          "name": "read_file"
+        },
+        {
+          "type": "tool_not_called",
+          "name": "write_file"
+        },
+        {
+          "type": "tool_not_called",
+          "name": "edit_file"
+        },
+        {
+          "type": "tool_not_called",
+          "name": "batch"
+        }
+      ]
+    }
+  ]
+}

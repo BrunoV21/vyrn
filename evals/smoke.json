@@ -1,0 +1,63 @@
+{
+  "name": "smoke",
+  "cases": [
+    {
+      "id": "read-fixture",
+      "description": "The agent should use read_file and report the exact fixture marker.",
+      "prompt": "Use the read_file tool to read evals/fixtures/read-fixture.txt. Reply with the exact marker value and no extra explanation.",
+      "max_turns": 8,
+      "assertions": [
+        {
+          "type": "assistant_contains",
+          "value": "VYRN_EVAL_MARKER_2026"
+        },
+        {
+          "type": "tool_called",
+          "name": "read_file"
+        },
+        {
+          "type": "file_contains",
+          "path": "evals/fixtures/read-fixture.txt",
+          "value": "VYRN_EVAL_MARKER_2026"
+        }
+      ]
+    },
+    {
+      "id": "write-artifact",
+      "description": "The agent should create an ignored eval artifact with write_file.",
+      "prompt": "Use the write_file tool exactly once to write this exact text to .vyrn/eval-runs/live-write-artifact.txt: VYRN_WRITE_MARKER_2026. After the tool succeeds, reply with exactly VYRN_WRITE_MARKER_2026.",
+      "max_turns": 6,
+      "assertions": [
+        {
+          "type": "assistant_contains",
+          "value": "VYRN_WRITE_MARKER_2026"
+        },
+        {
+          "type": "tool_called",
+          "name": "write_file"
+        },
+        {
+          "type": "file_contains",
+          "path": ".vyrn/eval-runs/live-write-artifact.txt",
+          "value": "VYRN_WRITE_MARKER_2026"
+        }
+      ]
+    },
+    {
+      "id": "batch-command",
+      "description": "The agent should run a simple shell command through batch and report its output.",
+      "prompt": "Use the batch tool exactly once to run: printf VYRN_BATCH_MARKER_2026. After the tool succeeds, reply with exactly VYRN_BATCH_MARKER_2026.",
+      "max_turns": 6,
+      "assertions": [
+        {
+          "type": "assistant_contains",
+          "value": "VYRN_BATCH_MARKER_2026"
+        },
+        {
+          "type": "tool_called",
+          "name": "batch"
+        }
+      ]
+    }
+  ]
+}

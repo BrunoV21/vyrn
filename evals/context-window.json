@@ -1,0 +1,21 @@
+{
+  "name": "context-window",
+  "cases": [
+    {
+      "id": "large-read",
+      "description": "The agent should survive a large tool output without sending an oversized follow-up request.",
+      "prompt": "Use read_file exactly once to read evals/fixtures/large-context.txt. After the tool call succeeds, reply with exactly VYRN_LARGE_CONTEXT_DONE. Do not call any more tools after the first read_file result.",
+      "max_turns": 4,
+      "assertions": [
+        {
+          "type": "assistant_contains",
+          "value": "VYRN_LARGE_CONTEXT_DONE"
+        },
+        {
+          "type": "tool_called",
+          "name": "read_file"
+        }
+      ]
+    }
+  ]
+}
