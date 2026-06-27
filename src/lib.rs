@@ -3,6 +3,7 @@ pub mod app;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod eval;
 pub mod llm;
 pub mod mcp;
 pub mod skills;
