@@ -12,10 +12,17 @@ fn repl_runs_against_openai_compatible_streaming_server() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
-        for _ in 0..2 {
+        for _ in 0..3 {
             let (mut stream, _) = listener.accept().unwrap();
             let body = read_http_body(&mut stream);
-            if body.contains(r#""role":"tool""#) {
+            if body.contains("Current scratchpad")
+                || body.contains("New consumed tool batch and assistant response")
+            {
+                write_json(
+                    &mut stream,
+                    r#"{"choices":[{"message":{"role":"assistant","content":"- read_file saw fixture.txt: hello from e2e."}}],"usage":{"prompt_tokens":80,"completion_tokens":16,"total_tokens":96}}"#,
+                );
+            } else if body.contains("[turn scratchpad]") {
                 write_sse(
                     &mut stream,
                     r#"data: {"choices":[{"delta":{"content":"I read fixture.txt: hello from e2e."}}]}"#,
@@ -226,12 +233,12 @@ fn repl_compacts_tool_history_and_continues_past_eight_rounds() {
             let (mut stream, _) = listener.accept().unwrap();
             let body = read_http_body(&mut stream);
             server_bodies.lock().unwrap().push(body.clone());
-            if body.contains("compact terminal-agent tool history")
-                || body.contains("Tool history to compact")
+            if body.contains("Current scratchpad")
+                || body.contains("New consumed tool batch and assistant response")
             {
                 write_json(
                     &mut stream,
-                    r#"{"choices":[{"message":{"role":"assistant","content":"- Summarized earlier fixture reads and retained the fact that fixture.txt returned repeated x characters."}}],"usage":{"prompt_tokens":120,"completion_tokens":24,"total_tokens":144}}"#,
+                    r#"{"choices":[{"message":{"role":"assistant","content":"- Summarized consumed fixture read batch and retained that fixture.txt returned repeated x characters."}}],"usage":{"prompt_tokens":120,"completion_tokens":24,"total_tokens":144}}"#,
                 );
                 continue;
             }
@@ -301,18 +308,25 @@ api_key = ""
     assert!(
         agent_requests
             .iter()
-            .any(|request| request.contains("[compacted tool history]")),
+            .any(|request| request.contains("[turn scratchpad]")),
         "{requests:#?}"
     );
     assert!(
-        !agent_requests[0].contains("[compacted tool history]"),
+        !agent_requests[0].contains("[turn scratchpad]"),
         "{}",
         agent_requests[0]
     );
     assert!(
+        agent_requests
+            .iter()
+            .skip(1)
+            .all(|request| request.matches(r#""role":"tool""#).count() <= 1),
+        "{requests:#?}"
+    );
+    assert!(
         requests
             .iter()
-            .any(|request| request.contains("Tool history to compact")),
+            .any(|request| request.contains("New consumed tool batch and assistant response")),
         "{requests:#?}"
     );
     for request in agent_requests.into_iter().skip(1) {
@@ -390,11 +404,18 @@ fn repl_sends_read_image_tool_results_as_vision_content() {
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let server_bodies = Arc::clone(&bodies);
     let server = thread::spawn(move || {
-        for index in 0..2 {
+        for index in 0..3 {
             let (mut stream, _) = listener.accept().unwrap();
             let body = read_http_body(&mut stream);
-            server_bodies.lock().unwrap().push(body);
-            if index == 0 {
+            server_bodies.lock().unwrap().push(body.clone());
+            if body.contains("Current scratchpad")
+                || body.contains("New consumed tool batch and assistant response")
+            {
+                write_json(
+                    &mut stream,
+                    r#"{"choices":[{"message":{"role":"assistant","content":"- read_image attached sample.png for inspection."}}],"usage":{"prompt_tokens":90,"completion_tokens":18,"total_tokens":108}}"#,
+                );
+            } else if index == 0 {
                 write_sse(
                     &mut stream,
                     r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_image","type":"function","function":{"name":"read_image","arguments":"{\"paths\":[\"sample.png\"]}"}}]}}]}"#,
@@ -445,14 +466,14 @@ api_key = ""
         String::from_utf8_lossy(&output.stderr)
     );
     let requests = bodies.lock().unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert!(
         requests[0].contains(r#""name":"read_image""#),
         "{}",
         requests[0]
     );
     assert!(
-        requests[1].contains("data:image/png;base64,iVBORw=="),
+        !requests[1].contains("data:image/png;base64"),
         "{}",
         requests[1]
     );
@@ -461,6 +482,7 @@ api_key = ""
         "{}",
         requests[1]
     );
+    assert!(requests[2].contains("[turn scratchpad]"), "{}", requests[2]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("The image tool result was visible."));
 }
