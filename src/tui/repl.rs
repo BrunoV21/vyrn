@@ -4,6 +4,10 @@ use crate::agent::tokens::{
     estimate_chat_request_breakdown, estimate_messages_breakdown, estimate_unpruned_request_tokens,
 };
 use crate::agent::transcript::{Exchange, truncate};
+use crate::agent::turn::{
+    TurnScratchpad, build_fitted_turn_scratchpad_update_messages, build_turn_messages,
+    prepare_next_turn_context, turn_scratchpad_update_source,
+};
 use crate::app::App;
 use crate::config::{ModelProfile, ModelRegistry, ModelState};
 use crate::llm::{
@@ -11,7 +15,7 @@ use crate::llm::{
 };
 use crate::tools::{MachineManifest, ToolResult};
 use crate::vision;
-use crossterm::cursor::{MoveDown, MoveToColumn, MoveUp};
+use crossterm::cursor::{MoveToColumn, MoveUp, RestorePosition, SavePosition};
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
 };
@@ -42,9 +46,6 @@ const SLASH_COMMANDS: &[&str] = &[
     "/exit",
 ];
 const MAX_TOOL_ROUNDS: usize = 64;
-const TOOL_CONTEXT_COMPACTION_PERCENT: usize = 70;
-const TOOL_ROUNDS_TO_KEEP: usize = 2;
-const COMPACTED_TOOL_HISTORY_PREFIX: &str = "[compacted tool history]";
 const MAX_PROMPT_HISTORY: usize = 100;
 const BLOCK_SPACING_LINES: usize = 2;
 const VY_VIOLET: Color = Color::Rgb {
@@ -491,7 +492,11 @@ impl Repl {
             &images,
         );
         usage.context_tokens = prompt.estimated_tokens.tokens;
-        let mut messages = prompt.messages;
+        let base_messages = prompt.messages;
+        let mut scratchpad = TurnScratchpad::default();
+        let mut current_tool_batch = Vec::new();
+        let mut last_request_messages =
+            build_turn_messages(&base_messages, &scratchpad, &current_tool_batch);
         let mut assistant_text = String::new();
         let mut all_tool_calls = Vec::new();
         let mut all_tool_results = Vec::new();
@@ -499,6 +504,7 @@ impl Repl {
 
         for round in 0..MAX_TOOL_ROUNDS {
             let tool_schemas = self.app.tools.schemas();
+            let messages = build_turn_messages(&base_messages, &scratchpad, &current_tool_batch);
             let request_breakdown = estimate_chat_request_breakdown(&messages, &tool_schemas);
             let request_tokens = request_breakdown.total();
             let request_would_be = estimate_unpruned_request_tokens(
@@ -517,6 +523,15 @@ impl Repl {
                 request_breakdown.tool_call_outputs,
                 request_breakdown.assistant_context
             ));
+            let has_chained_context = round > 0
+                || !scratchpad.summary.trim().is_empty()
+                || !current_tool_batch.is_empty();
+            if has_chained_context && request_tokens > self.app.config.context.max_tokens {
+                return Err(LlmError::Input(format!(
+                    "context budget exceeded before chained tool request: estimated {request_tokens} tokens exceeds configured {}",
+                    self.app.config.context.max_tokens
+                )));
+            }
 
             emit(TuiUpdate::AssistantStart);
             let response = self
@@ -540,6 +555,7 @@ impl Repl {
                 )
                 .await?;
             emit(TuiUpdate::AssistantDone);
+            last_request_messages = messages;
 
             let message = response
                 .choices
@@ -580,22 +596,40 @@ impl Repl {
                 break;
             }
 
-            messages.push(message);
-            let mut tool_images = Vec::new();
-            for call in tool_calls {
+            let assistant_tool_message = message;
+            current_tool_batch = vec![assistant_tool_message.clone()];
+            for (tool_index, call) in tool_calls.into_iter().enumerate() {
                 let result = self.execute_tool_call(&call).await;
+                let mut incremental_batch = vec![assistant_tool_message.clone()];
                 match &result {
                     Ok(tool_result) => {
                         emit(TuiUpdate::ToolOk {
                             name: tool_result.name.clone(),
                             preview: tool_preview(tool_result),
                         });
-                        messages.push(ChatMessage::tool(
+                        let tool_message = ChatMessage::tool(
                             call.id.clone(),
                             truncate(&tool_result.content, 8000),
-                        ));
-                        tool_images.extend(tool_result.images.clone());
+                        );
+                        incremental_batch.push(tool_message.clone());
+                        current_tool_batch.push(tool_message);
                         all_tool_results.push(tool_result.clone());
+                        let mut tool_images = tool_result.images.clone();
+                        dedupe_images(&mut tool_images);
+                        tool_images.truncate(vision::MAX_IMAGES_PER_MESSAGE);
+                        if !tool_images.is_empty() {
+                            let sources = tool_images
+                                .iter()
+                                .map(|image| image.source.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let image_message = ChatMessage::user_with_images(
+                                format!("Attached image(s) from read_image: {sources}"),
+                                &tool_images,
+                            );
+                            incremental_batch.push(image_message.clone());
+                            current_tool_batch.push(image_message);
+                        }
                     }
                     Err(error) => {
                         let content = format!("tool error: {error}");
@@ -603,55 +637,50 @@ impl Repl {
                             name: call.function.name.clone(),
                             error: error.to_string(),
                         });
-                        messages.push(ChatMessage::tool(call.id.clone(), content));
+                        let tool_message = ChatMessage::tool(call.id.clone(), content);
+                        incremental_batch.push(tool_message.clone());
+                        current_tool_batch.push(tool_message);
                     }
                 }
                 all_tool_calls.push(call);
-            }
-            dedupe_images(&mut tool_images);
-            tool_images.truncate(vision::MAX_IMAGES_PER_MESSAGE);
-            if !tool_images.is_empty() {
-                let sources = tool_images
-                    .iter()
-                    .map(|image| image.source.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                messages.push(ChatMessage::user_with_images(
-                    format!("Attached image(s) from read_image: {sources}"),
-                    &tool_images,
+                scratchpad = self
+                    .update_turn_scratchpad(
+                        &scratchpad,
+                        &incremental_batch,
+                        &assistant_tool_message,
+                        &mut usage,
+                        self.app.config.context.max_tokens,
+                    )
+                    .await?;
+                self.debug_log(format!(
+                    "turn_scratchpad_update round={} tool_index={} tokens={} chars={}",
+                    round,
+                    tool_index,
+                    crate::agent::tokens::estimate_text_tokens(&scratchpad.summary),
+                    scratchpad.summary.chars().count()
                 ));
-            }
-            let preparation = match self
-                .prepare_tool_chain_next_request(
-                    &mut messages,
+                let next_context = prepare_next_turn_context(
+                    &base_messages,
+                    &scratchpad,
+                    &current_tool_batch,
                     &tool_schemas,
                     self.app.config.context.max_tokens,
-                    &mut usage,
-                )
-                .await
-            {
-                Ok(preparation) => preparation,
-                Err(error) => {
-                    self.debug_log(format!(
-                        "tool_chain_prepare_error round={} error={}",
-                        round, error
-                    ));
-                    return Err(error);
-                }
-            };
-            self.debug_log(format!(
-                "tool_chain_prepare round={} before_tokens={} after_tokens={} threshold={} max_context={} compacted={} retained_rounds={}",
-                round,
-                preparation.before_tokens,
-                preparation.after_tokens,
-                preparation.threshold,
-                preparation.max_tokens,
-                preparation.compacted,
-                preparation
-                    .retained_rounds
-                    .map(|rounds| rounds.to_string())
-                    .unwrap_or_else(|| "none".to_string())
-            ));
+                )?;
+                scratchpad = next_context.scratchpad;
+                current_tool_batch = next_context.tool_batch;
+                let preparation = next_context.preparation;
+                self.debug_log(format!(
+                    "tool_chain_prepare round={} tool_index={} before_tokens={} after_tokens={} threshold={} max_context={} scratchpad_tokens={} current_batch_messages={}",
+                    round,
+                    tool_index,
+                    preparation.before_tokens,
+                    preparation.after_tokens,
+                    preparation.threshold,
+                    preparation.max_tokens,
+                    crate::agent::tokens::estimate_text_tokens(&scratchpad.summary),
+                    current_tool_batch.len()
+                ));
+            }
             if round + 1 == MAX_TOOL_ROUNDS {
                 hit_tool_round_limit = true;
             }
@@ -664,7 +693,8 @@ impl Repl {
             tool_results: all_tool_results,
         });
         usage.context_tokens =
-            estimate_chat_request_breakdown(&messages, &self.app.tools.schemas()).total();
+            estimate_chat_request_breakdown(&last_request_messages, &self.app.tools.schemas())
+                .total();
         self.app.stats.push_turn(usage);
         if let Some(turn) = self.app.stats.turns.last() {
             self.debug_log(format!(
@@ -693,134 +723,27 @@ impl Repl {
         Ok(())
     }
 
-    async fn prepare_tool_chain_next_request(
+    async fn update_turn_scratchpad(
         &self,
-        messages: &mut Vec<ChatMessage>,
-        tools: &[Value],
-        max_tokens: usize,
+        scratchpad: &TurnScratchpad,
+        consumed_tool_batch: &[ChatMessage],
+        assistant_response: &ChatMessage,
         usage: &mut TurnUsage,
-    ) -> Result<ToolChainPreparation, LlmError> {
-        let threshold = tool_context_compaction_threshold(max_tokens);
-        let current_tokens = estimate_chat_request_breakdown(messages, tools).total();
-        if current_tokens < threshold {
-            return Ok(ToolChainPreparation {
-                before_tokens: current_tokens,
-                after_tokens: current_tokens,
-                threshold,
-                max_tokens,
-                compacted: false,
-                retained_rounds: None,
-            });
-        }
-
-        let original = messages.clone();
-        let strategies = [TOOL_ROUNDS_TO_KEEP, 1, 0];
-        let mut best = None;
-
-        for keep_recent_rounds in strategies {
-            let Some(source) =
-                tool_history_compaction_source(&original, keep_recent_rounds, max_tokens)
-            else {
-                if current_tokens <= max_tokens {
-                    return Ok(ToolChainPreparation {
-                        before_tokens: current_tokens,
-                        after_tokens: current_tokens,
-                        threshold,
-                        max_tokens,
-                        compacted: false,
-                        retained_rounds: None,
-                    });
-                }
-                continue;
-            };
-            let compaction = self
-                .compact_tool_history_with_llm(&source, keep_recent_rounds, max_tokens)
-                .await?;
-            let total = compaction.input_tokens + compaction.output_tokens;
-            usage.add_call_with_breakdown(
-                format!("tool-compaction-{keep_recent_rounds}"),
-                total,
-                total,
-                TokenBreakdown {
-                    summary_inputs: compaction.input_tokens,
-                    summary_outputs: compaction.output_tokens,
-                    ..TokenBreakdown::default()
-                },
-            );
-
-            let mut candidate = original.clone();
-            compact_tool_history_with_summary(
-                &mut candidate,
-                keep_recent_rounds,
-                &compaction.summary,
-            );
-            let candidate_tokens = estimate_chat_request_breakdown(&candidate, tools).total();
-            if best
-                .as_ref()
-                .is_none_or(|(_, best_tokens, _)| candidate_tokens < *best_tokens)
-            {
-                best = Some((candidate.clone(), candidate_tokens, keep_recent_rounds));
-            }
-            if candidate_tokens <= max_tokens {
-                *messages = candidate;
-                return Ok(ToolChainPreparation {
-                    before_tokens: current_tokens,
-                    after_tokens: candidate_tokens,
-                    threshold,
-                    max_tokens,
-                    compacted: true,
-                    retained_rounds: Some(keep_recent_rounds),
-                });
-            }
-        }
-
-        if let Some((candidate, candidate_tokens, keep_recent_rounds)) = best {
-            *messages = candidate;
-            if candidate_tokens <= max_tokens {
-                return Ok(ToolChainPreparation {
-                    before_tokens: current_tokens,
-                    after_tokens: candidate_tokens,
-                    threshold,
-                    max_tokens,
-                    compacted: true,
-                    retained_rounds: Some(keep_recent_rounds),
-                });
-            }
-            return Err(LlmError::Input(format!(
-                "context budget exceeded: estimated {candidate_tokens} tokens after LLM tool history compaction exceeds configured {max_tokens}"
-            )));
-        }
-
-        if current_tokens > max_tokens {
-            return Err(LlmError::Input(format!(
-                "context budget exceeded: estimated {current_tokens} tokens after tool calls exceeds configured {max_tokens}"
-            )));
-        }
-
-        Ok(ToolChainPreparation {
-            before_tokens: current_tokens,
-            after_tokens: current_tokens,
-            threshold,
-            max_tokens,
-            compacted: false,
-            retained_rounds: None,
-        })
-    }
-
-    async fn compact_tool_history_with_llm(
-        &self,
-        source: &str,
-        keep_recent_rounds: usize,
         max_tokens: usize,
-    ) -> Result<ToolHistoryCompaction, LlmError> {
-        let source = fit_tool_compaction_source_to_budget(source, keep_recent_rounds, max_tokens);
-        let messages = build_tool_history_compaction_messages(&source, keep_recent_rounds);
+    ) -> Result<TurnScratchpad, LlmError> {
+        let source = turn_scratchpad_update_source(consumed_tool_batch, assistant_response);
+        let messages =
+            build_fitted_turn_scratchpad_update_messages(&scratchpad.summary, &source, max_tokens);
         let estimated_input_tokens = estimate_messages_breakdown(&messages).total();
         self.debug_log(format!(
-            "tool_compaction_request retained_rounds={} input_estimate={} source_chars={}",
-            keep_recent_rounds,
+            "turn_scratchpad_request input_estimate={} source_chars={} previous_chars={}",
             estimated_input_tokens,
-            source.chars().count()
+            messages
+                .get(1)
+                .and_then(ChatMessage::content_text)
+                .map(|content| content.chars().count())
+                .unwrap_or_default(),
+            scratchpad.summary.chars().count()
         ));
         let response = self
             .app
@@ -839,32 +762,37 @@ impl Repl {
             .and_then(|choice| choice.message.content_text().map(str::trim))
             .filter(|summary| !summary.is_empty())
             .ok_or_else(|| {
-                LlmError::Input("tool history compaction returned an empty summary".to_string())
+                LlmError::Input("turn scratchpad update returned an empty summary".to_string())
             })?
             .to_string();
-        let usage = response.usage.unwrap_or_default();
-        let input_tokens = if usage.prompt_tokens > 0 {
-            usage.prompt_tokens
+        let usage_info = response.usage.unwrap_or_default();
+        let input_tokens = if usage_info.prompt_tokens > 0 {
+            usage_info.prompt_tokens
         } else {
             estimated_input_tokens
         };
-        let output_tokens = if usage.completion_tokens > 0 {
-            usage.completion_tokens
+        let output_tokens = if usage_info.completion_tokens > 0 {
+            usage_info.completion_tokens
         } else {
             crate::agent::tokens::estimate_text_tokens(&summary)
         };
+        usage.add_call_with_breakdown(
+            "turn-scratchpad",
+            input_tokens + output_tokens,
+            input_tokens + output_tokens,
+            TokenBreakdown {
+                summary_inputs: input_tokens,
+                summary_outputs: output_tokens,
+                ..TokenBreakdown::default()
+            },
+        );
         self.debug_log(format!(
-            "tool_compaction_response retained_rounds={} input_tokens={} output_tokens={} summary_tokens={}",
-            keep_recent_rounds,
+            "turn_scratchpad_response input_tokens={} output_tokens={} summary_tokens={}",
             input_tokens,
             output_tokens,
             crate::agent::tokens::estimate_text_tokens(&summary)
         ));
-        Ok(ToolHistoryCompaction {
-            summary,
-            input_tokens,
-            output_tokens,
-        })
+        Ok(TurnScratchpad { summary })
     }
 
     fn debug_log(&self, event: impl AsRef<str>) {
@@ -1054,244 +982,6 @@ fn unix_timestamp_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default()
-}
-
-#[derive(Debug, Clone, Copy)]
-struct MessageRange {
-    start: usize,
-    end: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ToolChainPreparation {
-    before_tokens: usize,
-    after_tokens: usize,
-    threshold: usize,
-    max_tokens: usize,
-    compacted: bool,
-    retained_rounds: Option<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ToolHistoryCompaction {
-    summary: String,
-    input_tokens: usize,
-    output_tokens: usize,
-}
-
-fn tool_context_compaction_threshold(max_tokens: usize) -> usize {
-    max_tokens
-        .saturating_mul(TOOL_CONTEXT_COMPACTION_PERCENT)
-        .div_ceil(100)
-        .max(1)
-}
-
-fn tool_history_compaction_source(
-    messages: &[ChatMessage],
-    keep_recent_rounds: usize,
-    max_tokens: usize,
-) -> Option<String> {
-    let existing_history = compacted_tool_history(messages);
-    let retained = messages
-        .iter()
-        .filter(|message| !is_compacted_tool_history_message(message))
-        .cloned()
-        .collect::<Vec<_>>();
-    let rounds = completed_tool_rounds(&retained);
-    if rounds.len() <= keep_recent_rounds {
-        return None;
-    }
-
-    let compact_count = rounds.len() - keep_recent_rounds;
-    let compacted_rounds = &rounds[..compact_count];
-    let mut lines = Vec::new();
-    if let Some(existing_history) = existing_history.filter(|history| !history.trim().is_empty()) {
-        lines.push(existing_history);
-    }
-    for (idx, range) in compacted_rounds.iter().enumerate() {
-        lines.push(tool_round_compaction_source(&retained, *range, idx + 1));
-    }
-
-    Some(truncate(
-        &lines.join("\n\n"),
-        tool_compaction_source_char_limit(max_tokens),
-    ))
-}
-
-fn compact_tool_history_with_summary(
-    messages: &mut Vec<ChatMessage>,
-    keep_recent_rounds: usize,
-    summary: &str,
-) -> bool {
-    let retained = messages
-        .iter()
-        .filter(|message| !is_compacted_tool_history_message(message))
-        .cloned()
-        .collect::<Vec<_>>();
-    let rounds = completed_tool_rounds(&retained);
-    if rounds.len() <= keep_recent_rounds {
-        return false;
-    }
-
-    let compact_count = rounds.len() - keep_recent_rounds;
-    let compacted_rounds = &rounds[..compact_count];
-    let compacted_message = ChatMessage::system(format!(
-        "{COMPACTED_TOOL_HISTORY_PREFIX}\n{}",
-        summary.trim()
-    ));
-
-    let mut next = Vec::new();
-    let mut inserted = false;
-    let mut index = 0;
-    while index < retained.len() {
-        if let Some(range) = compacted_rounds.iter().find(|range| range.start == index) {
-            if !inserted {
-                next.push(compacted_message.clone());
-                inserted = true;
-            }
-            index = range.end;
-        } else {
-            next.push(retained[index].clone());
-            index += 1;
-        }
-    }
-
-    *messages = next;
-    true
-}
-
-fn tool_compaction_source_char_limit(max_tokens: usize) -> usize {
-    max_tokens.saturating_mul(3).clamp(1200, 12000)
-}
-
-fn build_tool_history_compaction_messages(
-    source: &str,
-    keep_recent_rounds: usize,
-) -> Vec<ChatMessage> {
-    vec![
-        ChatMessage::system(
-            "You compact terminal-agent tool history for the next model call. Preserve only task-relevant facts, decisions, file paths, commands/outcomes, errors that changed behavior, and final artifacts. Do not preserve raw tool call JSON or full stdout/stderr. Write concise bullets. Return only the compacted history.",
-        ),
-        ChatMessage::user(format!(
-            "This compacted history will replace older assistant/tool messages. The latest {keep_recent_rounds} completed tool round(s), if any, will remain available separately.\n\nTool history to compact:\n{source}"
-        )),
-    ]
-}
-
-fn fit_tool_compaction_source_to_budget(
-    source: &str,
-    keep_recent_rounds: usize,
-    max_tokens: usize,
-) -> String {
-    let mut fitted = source.to_string();
-    loop {
-        let messages = build_tool_history_compaction_messages(&fitted, keep_recent_rounds);
-        if estimate_messages_breakdown(&messages).total() <= max_tokens {
-            return fitted;
-        }
-        let current_chars = fitted.chars().count();
-        if current_chars <= 256 {
-            return truncate(&fitted, current_chars.saturating_sub(1).max(1));
-        }
-        fitted = truncate(&fitted, current_chars.saturating_mul(3) / 4);
-    }
-}
-
-fn compacted_tool_history(messages: &[ChatMessage]) -> Option<String> {
-    let mut histories = messages
-        .iter()
-        .filter(|message| is_compacted_tool_history_message(message))
-        .filter_map(ChatMessage::content_text)
-        .map(|content| {
-            content
-                .strip_prefix(COMPACTED_TOOL_HISTORY_PREFIX)
-                .unwrap_or(content)
-                .trim()
-                .to_string()
-        })
-        .filter(|content| !content.is_empty())
-        .collect::<Vec<_>>();
-    if histories.is_empty() {
-        None
-    } else {
-        Some(histories.drain(..).collect::<Vec<_>>().join("\n"))
-    }
-}
-
-fn is_compacted_tool_history_message(message: &ChatMessage) -> bool {
-    message.role == "system"
-        && message
-            .content_text()
-            .is_some_and(|content| content.starts_with(COMPACTED_TOOL_HISTORY_PREFIX))
-}
-
-fn completed_tool_rounds(messages: &[ChatMessage]) -> Vec<MessageRange> {
-    let mut ranges = Vec::new();
-    let mut index = 0;
-    while index < messages.len() {
-        let message = &messages[index];
-        let Some(tool_calls) = &message.tool_calls else {
-            index += 1;
-            continue;
-        };
-        if message.role != "assistant" || tool_calls.is_empty() {
-            index += 1;
-            continue;
-        }
-
-        let start = index;
-        index += 1;
-        let first_result = index;
-        while index < messages.len() && messages[index].role == "tool" {
-            index += 1;
-        }
-        if index < messages.len() && is_tool_image_attachment_message(&messages[index]) {
-            index += 1;
-        }
-        if index > first_result {
-            ranges.push(MessageRange { start, end: index });
-        }
-    }
-    ranges
-}
-
-fn is_tool_image_attachment_message(message: &ChatMessage) -> bool {
-    message.role == "user"
-        && message
-            .content_text()
-            .is_some_and(|content| content.starts_with("Attached image(s) from read_image:"))
-}
-
-fn tool_round_compaction_source(
-    messages: &[ChatMessage],
-    range: MessageRange,
-    round_number: usize,
-) -> String {
-    let mut tools = Vec::new();
-    let mut results = Vec::new();
-    for message in &messages[range.start..range.end] {
-        if let Some(tool_calls) = &message.tool_calls {
-            for call in tool_calls {
-                tools.push(format!(
-                    "{}({})",
-                    call.function.name,
-                    truncate(&call.function.arguments, 800)
-                ));
-            }
-        } else if message.role == "tool" {
-            let result = message.content_text().unwrap_or_default();
-            results.push(truncate(result, 1600).replace('\n', " "));
-        } else if is_tool_image_attachment_message(message) {
-            results.push(message.content_text().unwrap_or_default().to_string());
-        }
-    }
-
-    let mut line = format!("round {round_number}\ntools: {}", tools.join(", "));
-    if !results.is_empty() {
-        line.push_str("\nresults:\n- ");
-        line.push_str(&results.join("\n- "));
-    }
-    truncate(&line, 2200)
 }
 
 pub async fn select_model(models: &ModelRegistry) -> anyhow::Result<ModelProfile> {
@@ -1725,14 +1415,14 @@ fn print_stats_line(segments: &[(String, Color)]) -> anyhow::Result<()> {
 
 fn read_composer_line(status: &str, history: &[String]) -> anyhow::Result<UserTurnInput> {
     let mut state = ComposerState::default();
-    render_composer(&state.input, state.images.len(), None, status)?;
+    execute!(std::io::stdout(), SavePosition)?;
+    render_composer_state(&state, status)?;
 
     loop {
         match event::read()? {
             Event::Key(key) => match handle_composer_key(key, &mut state, history)? {
                 ComposerAction::Continue => {
-                    let hints = slash_hints(&state.input);
-                    render_composer(&state.input, state.images.len(), hints.as_deref(), status)?;
+                    render_composer_state(&state, status)?;
                 }
                 ComposerAction::Submit => {
                     clear_composer()?;
@@ -1752,13 +1442,22 @@ fn read_composer_line(status: &str, history: &[String]) -> anyhow::Result<UserTu
             Event::Paste(text) => {
                 reset_history_navigation(&mut state);
                 state.input.push_str(&text);
-                state.completion.prefix.clear();
-                let hints = slash_hints(&state.input);
-                render_composer(&state.input, state.images.len(), hints.as_deref(), status)?;
+                reset_completion(&mut state.completion);
+                render_composer_state(&state, status)?;
             }
             _ => {}
         }
     }
+}
+
+fn render_composer_state(state: &ComposerState, status: &str) -> anyhow::Result<()> {
+    let completion_suffix = slash_completion_suffix(&state.input, &state.completion);
+    render_composer(
+        &state.input,
+        state.images.len(),
+        completion_suffix.as_deref(),
+        status,
+    )
 }
 
 #[derive(Default)]
@@ -1795,11 +1494,14 @@ fn handle_composer_key(
             Ok(ComposerAction::Exit)
         }
         KeyCode::Esc => Ok(ComposerAction::Exit),
-        KeyCode::Enter => Ok(ComposerAction::Submit),
+        KeyCode::Enter => {
+            accept_slash_completion(state);
+            Ok(ComposerAction::Submit)
+        }
         KeyCode::Backspace => {
             reset_history_navigation(state);
             state.input.pop();
-            state.completion.prefix.clear();
+            reset_completion(&mut state.completion);
             Ok(ComposerAction::Continue)
         }
         KeyCode::Up if key.modifiers.is_empty() => {
@@ -1812,7 +1514,7 @@ fn handle_composer_key(
         }
         KeyCode::Tab => {
             reset_history_navigation(state);
-            autocomplete(&mut state.input, &mut state.completion);
+            accept_slash_completion(state);
             Ok(ComposerAction::Continue)
         }
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1824,7 +1526,7 @@ fn handle_composer_key(
             if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
                 reset_history_navigation(state);
                 state.input.push(ch);
-                state.completion.prefix.clear();
+                reset_completion(&mut state.completion);
             }
             Ok(ComposerAction::Continue)
         }
@@ -1850,7 +1552,7 @@ fn history_previous(state: &mut ComposerState, history: &[String]) {
     };
     state.history_cursor = Some(cursor);
     state.input = history[cursor].clone();
-    state.completion.prefix.clear();
+    reset_completion(&mut state.completion);
 }
 
 fn history_next(state: &mut ComposerState, history: &[String]) {
@@ -1866,7 +1568,7 @@ fn history_next(state: &mut ComposerState, history: &[String]) {
         state.history_cursor = None;
         state.input = std::mem::take(&mut state.history_draft);
     }
-    state.completion.prefix.clear();
+    reset_completion(&mut state.completion);
 }
 
 fn reset_history_navigation(state: &mut ComposerState) {
@@ -1902,61 +1604,77 @@ fn save_prompt_history(
     std::fs::write(path, raw)
 }
 
-fn autocomplete(input: &mut String, completion: &mut CompletionState) {
-    if !input.starts_with('/') || input.contains(' ') {
-        return;
-    }
-    let matches = SLASH_COMMANDS
-        .iter()
-        .copied()
-        .filter(|command| command.starts_with(input.as_str()))
-        .collect::<Vec<_>>();
-    if matches.is_empty() {
-        return;
-    }
-
-    if completion.prefix != *input {
-        completion.prefix = input.clone();
-        completion.index = 0;
-    } else {
-        completion.index = (completion.index + 1) % matches.len();
-    }
-    *input = matches[completion.index].to_string();
+fn reset_completion(completion: &mut CompletionState) {
+    completion.prefix.clear();
+    completion.index = 0;
 }
 
-fn slash_hints(input: &str) -> Option<String> {
-    if !input.starts_with('/') || input.contains(' ') {
+fn accept_slash_completion(state: &mut ComposerState) {
+    let Some(command) = active_slash_completion(&state.input, &state.completion) else {
+        return;
+    };
+    state.input = command.to_string();
+    reset_completion(&mut state.completion);
+}
+
+fn slash_completion_suffix(input: &str, completion: &CompletionState) -> Option<String> {
+    let command = active_slash_completion(input, completion)?;
+    let suffix = command.strip_prefix(input)?;
+    if suffix.is_empty() {
+        None
+    } else {
+        Some(suffix.to_string())
+    }
+}
+
+fn active_slash_completion(input: &str, completion: &CompletionState) -> Option<&'static str> {
+    if let Some(command) = SLASH_COMMANDS
+        .iter()
+        .copied()
+        .find(|command| *command == input)
+    {
+        return Some(command);
+    }
+    let matches = slash_completion_matches(input);
+    if matches.is_empty() {
         return None;
     }
-    let matches = SLASH_COMMANDS
+    let index = if completion.prefix == input {
+        completion.index
+    } else {
+        0
+    };
+    matches.get(index % matches.len()).copied()
+}
+
+fn slash_completion_matches(input: &str) -> Vec<&'static str> {
+    if !input.starts_with('/') || input.contains(' ') {
+        return Vec::new();
+    }
+    SLASH_COMMANDS
         .iter()
         .copied()
         .filter(|command| command.starts_with(input))
-        .collect::<Vec<_>>();
-    if matches.is_empty() {
-        None
-    } else {
-        Some(matches.join(" "))
-    }
+        .collect::<Vec<_>>()
 }
 
 fn paste_from_clipboard(state: &mut ComposerState) {
     match vision::image_from_clipboard() {
         Ok(Some(image)) if state.images.len() < vision::MAX_IMAGES_PER_MESSAGE => {
             state.images.push(image);
-            state.completion.prefix.clear();
+            reset_completion(&mut state.completion);
         }
         Ok(Some(_)) => {}
         Ok(None) => {
             if let Ok(Some(text)) = vision::text_from_clipboard() {
                 state.input.push_str(&text);
-                state.completion.prefix.clear();
+                reset_completion(&mut state.completion);
             }
         }
         Err(_) => {
             if let Ok(Some(text)) = vision::text_from_clipboard() {
                 state.input.push_str(&text);
-                state.completion.prefix.clear();
+                reset_completion(&mut state.completion);
             }
         }
     }
@@ -1965,15 +1683,16 @@ fn paste_from_clipboard(state: &mut ComposerState) {
 fn render_composer(
     input: &str,
     image_count: usize,
-    hints: Option<&str>,
+    completion_suffix: Option<&str>,
     status: &str,
 ) -> anyhow::Result<()> {
     let mut stdout = std::io::stdout();
     let input_background = GRAPHITE_SURFACE_RAISED;
     execute!(
         stdout,
+        RestorePosition,
         MoveToColumn(0),
-        Clear(ClearType::CurrentLine),
+        Clear(ClearType::FromCursorDown),
         SetBackgroundColor(input_background),
         Print(terminal_fill()),
         MoveToColumn(0),
@@ -1995,12 +1714,12 @@ fn render_composer(
             ))
         )?;
     }
-    if let Some(hints) = hints {
+    if let Some(completion_suffix) = completion_suffix {
         execute!(
             stdout,
             SetBackgroundColor(input_background),
             SetForegroundColor(VY_TEXT_DIM),
-            Print(format!("  {hints}"))
+            Print(completion_suffix)
         )?;
     }
     execute!(
@@ -2022,16 +1741,9 @@ fn render_composer(
 fn clear_composer() -> anyhow::Result<()> {
     execute!(
         std::io::stdout(),
+        RestorePosition,
         MoveToColumn(0),
-        Clear(ClearType::CurrentLine),
-        MoveDown(1),
-        MoveToColumn(0),
-        Clear(ClearType::CurrentLine),
-        MoveDown(1),
-        MoveToColumn(0),
-        Clear(ClearType::CurrentLine),
-        MoveUp(2),
-        MoveToColumn(0)
+        Clear(ClearType::FromCursorDown)
     )?;
     std::io::stdout().flush()?;
     Ok(())
@@ -2088,31 +1800,59 @@ fn banner_line(text: &str, width: usize) -> String {
 }
 
 fn print_user_block(input: &str, image_count: usize) -> anyhow::Result<()> {
-    print_block_line(
-        ">",
-        &user_display_line(input, image_count),
-        GRAPHITE_SURFACE_RAISED,
-        STEEL_BLUE,
-        VY_TECH_STRONG,
-    )?;
+    let mut lines = user_display_lines(input, image_count).into_iter();
+    if let Some(first_line) = lines.next() {
+        print_block_line(
+            ">",
+            &first_line,
+            GRAPHITE_SURFACE_RAISED,
+            STEEL_BLUE,
+            VY_TECH_STRONG,
+        )?;
+    }
+    for line in lines {
+        print_block_line(
+            " ",
+            &line,
+            GRAPHITE_SURFACE_RAISED,
+            STEEL_BLUE,
+            VY_TECH_STRONG,
+        )?;
+    }
     print_block_spacer()
 }
 
-fn user_display_line(input: &str, image_count: usize) -> String {
+fn user_display_lines(input: &str, image_count: usize) -> Vec<String> {
     if image_count == 0 {
-        input.to_string()
+        split_terminal_lines(input)
     } else if input.trim().is_empty() {
-        format!(
+        vec![format!(
             "[{image_count} image{} attached]",
             if image_count == 1 { "" } else { "s" }
-        )
+        )]
     } else {
-        format!(
-            "{}  [{} image{} attached]",
-            input,
-            image_count,
-            if image_count == 1 { "" } else { "s" }
-        )
+        let mut lines = split_terminal_lines(input);
+        if let Some(last_line) = lines.last_mut() {
+            last_line.push_str(&format!(
+                "  [{} image{} attached]",
+                image_count,
+                if image_count == 1 { "" } else { "s" }
+            ));
+        }
+        lines
+    }
+}
+
+fn split_terminal_lines(text: &str) -> Vec<String> {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let lines = normalized
+        .split('\n')
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
     }
 }
 
@@ -2664,6 +2404,91 @@ mod tests {
     }
 
     #[test]
+    fn slash_completion_suffix_shows_active_completion() {
+        let state = ComposerState {
+            input: "/sta".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            slash_completion_suffix(&state.input, &state.completion).as_deref(),
+            Some("ts")
+        );
+    }
+
+    #[test]
+    fn slash_completion_does_not_extend_exact_command_alias() {
+        let state = ComposerState {
+            input: "/model".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            active_slash_completion(&state.input, &state.completion),
+            Some("/model")
+        );
+        assert_eq!(
+            slash_completion_suffix(&state.input, &state.completion),
+            None
+        );
+    }
+
+    #[test]
+    fn tab_accepts_slash_completion_without_submitting() {
+        let mut state = ComposerState {
+            input: "/sta".to_string(),
+            ..Default::default()
+        };
+
+        let action = handle_composer_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut state,
+            &[],
+        )
+        .unwrap();
+
+        assert!(matches!(action, ComposerAction::Continue));
+        assert_eq!(state.input, "/stats");
+    }
+
+    #[test]
+    fn enter_submits_active_slash_completion() {
+        let mut state = ComposerState {
+            input: "/sta".to_string(),
+            ..Default::default()
+        };
+
+        let action = handle_composer_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &[],
+        )
+        .unwrap();
+
+        assert!(matches!(action, ComposerAction::Submit));
+        assert_eq!(state.input, "/stats");
+    }
+
+    #[test]
+    fn user_display_lines_preserve_multiline_input() {
+        assert_eq!(
+            user_display_lines("first line\nsecond line", 0),
+            vec!["first line".to_string(), "second line".to_string()]
+        );
+    }
+
+    #[test]
+    fn user_display_lines_attach_images_to_last_line() {
+        assert_eq!(
+            user_display_lines("first line\nsecond line", 2),
+            vec![
+                "first line".to_string(),
+                "second line  [2 images attached]".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn markdown_line_strips_headings_and_inline_markers() {
         let mut in_code_block = false;
         let segments = render_markdown_line(
@@ -2737,126 +2562,6 @@ mod tests {
 
         assert!(render_markdown_line("```", &mut in_code_block).is_empty());
         assert!(!in_code_block);
-    }
-
-    #[test]
-    fn tool_history_compaction_with_summary_keeps_recent_rounds() {
-        let mut messages = vec![
-            ChatMessage::system("system"),
-            ChatMessage::user("inspect files"),
-        ];
-        for index in 0..4 {
-            messages.push(tool_call_message(index));
-            messages.push(ChatMessage::tool(
-                format!("call_{index}"),
-                format!("large output from round {index}"),
-            ));
-        }
-
-        assert!(compact_tool_history_with_summary(
-            &mut messages,
-            TOOL_ROUNDS_TO_KEEP,
-            "- reviewed early tool results"
-        ));
-
-        let compacted = messages
-            .iter()
-            .filter_map(ChatMessage::content_text)
-            .find(|content| content.starts_with(COMPACTED_TOOL_HISTORY_PREFIX))
-            .unwrap();
-        assert!(compacted.contains("reviewed early tool results"));
-        assert!(!compacted.contains("large output from round 2"));
-        assert!(!compacted.contains("large output from round 3"));
-        assert_eq!(
-            messages
-                .iter()
-                .filter(|message| message.role == "assistant" && message.tool_calls.is_some())
-                .count(),
-            TOOL_ROUNDS_TO_KEEP
-        );
-    }
-
-    #[test]
-    fn tool_history_compaction_source_is_empty_when_no_rounds_can_be_compacted() {
-        let messages = vec![
-            ChatMessage::system("system"),
-            ChatMessage::user("inspect files"),
-            tool_call_message(0),
-            ChatMessage::tool("call_0", "small output"),
-        ];
-
-        assert!(tool_history_compaction_source(&messages, TOOL_ROUNDS_TO_KEEP, 4000).is_none());
-    }
-
-    #[test]
-    fn tool_history_compaction_source_includes_completed_old_rounds() {
-        let mut messages = vec![
-            ChatMessage::system("system"),
-            ChatMessage::user("inspect files"),
-        ];
-        for index in 0..4 {
-            messages.push(tool_call_message(index));
-            messages.push(ChatMessage::tool(
-                format!("call_{index}"),
-                "large output ".repeat(120),
-            ));
-        }
-
-        let source = tool_history_compaction_source(&messages, TOOL_ROUNDS_TO_KEEP, 1200).unwrap();
-
-        assert!(source.contains("round 1"));
-        assert!(source.contains("large output"));
-        assert!(!source.contains("round 3"));
-        assert!(!source.contains("round 4"));
-    }
-
-    #[test]
-    fn tool_history_compaction_can_drop_all_recent_rounds() {
-        let mut messages = vec![
-            ChatMessage::system("system"),
-            ChatMessage::user("inspect files"),
-        ];
-        for index in 0..3 {
-            messages.push(tool_call_message(index));
-            messages.push(ChatMessage::tool(
-                format!("call_{index}"),
-                format!("large output from round {index}"),
-            ));
-        }
-
-        assert!(compact_tool_history_with_summary(
-            &mut messages,
-            0,
-            "- all tool rounds summarized"
-        ));
-
-        assert_eq!(
-            messages
-                .iter()
-                .filter(|message| message.role == "assistant" && message.tool_calls.is_some())
-                .count(),
-            0
-        );
-        assert!(
-            messages
-                .iter()
-                .filter_map(ChatMessage::content_text)
-                .any(|content| content.starts_with(COMPACTED_TOOL_HISTORY_PREFIX))
-        );
-    }
-
-    fn tool_call_message(index: usize) -> ChatMessage {
-        ChatMessage::assistant_tool_calls(
-            String::new(),
-            vec![ToolCall {
-                id: format!("call_{index}"),
-                kind: "function".to_string(),
-                function: crate::llm::types::ToolCallFunction {
-                    name: "read_file".to_string(),
-                    arguments: format!(r#"{{"path":"fixture_{index}.txt"}}"#),
-                },
-            }],
-        )
     }
 
     fn segment_text(segments: &[StyledSegment]) -> String {
