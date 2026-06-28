@@ -1,13 +1,13 @@
 # First Run
 
-Create a local model profile:
+Create a global model profile:
 
 ```bash
-mkdir -p .vyrn
+mkdir -p ~/.vyrn
 ```
 
 ```toml
-# .vyrn/models.toml
+# ~/.vyrn/models.toml
 [models.llama3]
 base_url = "http://localhost:11434/v1"
 model = "llama3.2"
@@ -40,6 +40,10 @@ turn spent: 812 | turn history saved: 3,204 | session history saved: 11,847 | co
 ```
 
 Use `/exit` to close the session.
+
+If the model needs a decision during a turn, vyrn may render an `ask_user`
+clarification prompt. Choose an option with the keyboard, or use `Other` for a
+freeform reply. In plain text mode, type an option number or any text reply.
 
 ## Images
 

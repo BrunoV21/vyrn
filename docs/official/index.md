@@ -30,6 +30,8 @@ features:
     details: "Each request refreshes a compact summary instead of resending full conversation history."
   - title: "Raw batch power"
     details: "The batch tool is the primary extension primitive for shell work, scripts, installs, and host inspection."
+  - title: "Human clarification"
+    details: "The ask_user tool lets the model pause mid-turn for options or a freeform reply when a decision matters."
   - title: "Token savings"
     details: "Every completed turn reports tokens spent, history saved, and total history saved for the session."
   - title: "Open standards"
@@ -49,7 +51,7 @@ model llama3 context 4096<br>
 
 Most CLI agents are comfortable spending a large context budget before the user asks for anything. vyrn is built for the opposite environment: small local models, fast terminal workflows, and users who care about every token that enters the prompt.
 
-vyrn keeps the core prompt and tool list tiny, makes capability load progressively through skills and MCP discovery, and treats token savings as visible product behavior.
+vyrn keeps the core prompt and tool list tiny, makes capability load progressively through skills and MCP discovery, lets the model ask focused clarifying questions when needed, and treats token savings as visible product behavior.
 
 ## Install
 

@@ -10,7 +10,8 @@ vyrn has a deliberately small command surface. The primary interface is the inte
 | `vyrn --models` | Select a configured model profile before starting. `--model` is an alias. |
 | `vyrn --context 2048` | Override the context budget for this session. |
 | `vyrn --verbose` | Show full token counts and raw summary information. |
-| `vyrn --debug` | Show provider URLs, network details, and response bodies on errors. |
+| `vyrn --debug` | Show provider URLs, network details, response bodies on errors, and write LLM trace JSON. |
+| `vyrn debug-viewer` | Write a local static HTML viewer for debug trace JSON. |
 | `vyrn eval evals/basic.json` | Run JSON-defined live agent evals and write traces. |
 
 From a source checkout, prefix commands with `cargo run --`, for example:

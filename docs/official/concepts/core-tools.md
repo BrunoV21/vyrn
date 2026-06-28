@@ -11,6 +11,7 @@ Core tool descriptions must stay short. Token cost is part of the API.
 | `write_file` | Write content to a file, creating it if needed. |
 | `edit_file` | Replace an exact string in a file. |
 | `batch` | Execute shell commands on the host from the current working directory by default. |
+| `ask_user` | Ask the human for a clarification and continue the same turn. |
 | `refresh_manifest` | Rescan the host and replace the compact manifest. |
 
 ## `batch`
@@ -45,6 +46,16 @@ model round as OpenAI-compatible base64 image data URLs, while the transcript ke
 a compact text note.
 
 Use `read_image` for image files instead of shelling out to Python through `batch`.
+
+## `ask_user`
+
+`ask_user` lets the agent pause for clarification during a turn. It can ask one
+or more questions, each with optional choices. The terminal UI always allows a
+freeform reply through `Other`, so the user is never limited to the model's
+suggested options.
+
+Use it when a missing decision would materially change the work. Avoid using it
+for facts that can be discovered with tools.
 
 ## `edit_file`
 

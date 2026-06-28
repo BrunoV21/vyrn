@@ -105,9 +105,14 @@ choose simpler prompts or stricter output contracts for weaker models.
 
 Make token savings and context decisions auditable.
 
-`vyrn --trace` could write a local run report with per-call token accounting,
-summary revisions, activated skills, memory reads, and tool result sizes. The
-normal UI stays compact, while advanced users can inspect why context changed.
+Implemented in debug mode: interactive `vyrn --debug` sessions write structured
+LLM request/response JSON under `.vyrn/debug/sessions/`, and eval cases write
+`llm-trace.json` unless `--no-debug` is used. `vyrn debug-viewer` generates a
+local static HTML viewer for those trace files.
+
+Future trace improvements may add richer context-decision reports, summary
+revision diffs, activated skill metadata, memory reads, and tool result size
+histograms while keeping the normal UI compact.
 
 ## Non-goals for v1
 

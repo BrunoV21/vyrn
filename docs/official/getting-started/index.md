@@ -6,7 +6,8 @@ vyrn is designed for terminal-native users running local or small LLMs through a
 
 - Rust toolchain with Cargo.
 - An OpenAI-compatible chat completions endpoint.
-- A configured model profile in `.vyrn/models.toml` or `~/.vyrn/models.toml`.
+- A configured model profile in `~/.vyrn/models.toml`. Project-local
+  `.vyrn/models.toml` is available only when a repository needs an override.
 
 ## Core flow
 
@@ -18,7 +19,12 @@ vyrn is designed for terminal-native users running local or small LLMs through a
 
 ## Minimal model profile
 
+```bash
+mkdir -p ~/.vyrn
+```
+
 ```toml
+# ~/.vyrn/models.toml
 [models.llama3]
 base_url = "http://localhost:11434/v1"
 model = "llama3.2"

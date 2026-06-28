@@ -77,9 +77,15 @@ provided.
 - `summary.json` records suite status, timing, and token totals.
 - `<case-id>/trace.json` records requests, responses, tool calls, tool results,
   assertions, token accounting, and errors.
+- `<case-id>/llm-trace.json` records full OpenAI-compatible request bodies and
+  parsed responses for each LLM call when debug output is enabled.
 - `<case-id>/transcript.md` is the readable debugging transcript.
-- `<case-id>/debug.log` contains debug events by default. Use `--no-debug` only
-  when compact traces are preferred.
+- `<case-id>/debug.log` contains debug events by default. Use `--no-debug` to
+  suppress both `debug.log` events and `llm-trace.json`.
+
+Use `vyrn debug-viewer` to generate `.vyrn/debug/viewer.html`, then load any
+`llm-trace.json` file with the browser file picker or by dragging it into the
+page.
 
 ## Context Warnings
 

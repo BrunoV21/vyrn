@@ -53,14 +53,16 @@ vyrn/
 ├── Agent Loop (interactive REPL)
 │   ├── Context Manager       ← rolling summary + pruning
 │   ├── LLM Client            ← OpenAI-compatible, streaming
-│   ├── Tool Executor         ← core tools + batch
-│   └── TUI                   ← streaming output, token stats
+│   ├── Tool Executor         ← core tools + batch + human clarification
+│   └── TUI                   ← streaming output, clarification prompts, token stats
 │
 ├── Core Tools (always loaded, minimal token cost)
 │   ├── read_file
+│   ├── read_image
 │   ├── write_file
 │   ├── edit_file
 │   ├── batch                 ← raw shell executor
+│   ├── ask_user              ← human clarification handoff
 │   └── refresh_manifest      ← rescan machine, reinject
 │
 ├── Machine Manifest          ← fast startup scan of available tools
@@ -92,7 +94,9 @@ vyrn follows a two-tier config system:
     └── models.toml           ← configured model profiles
 ```
 
-A global config can also live at `~/.vyrn/` — **global overrides local** for all vyrn-specific settings.
+Normal user model profiles and config live at `~/.vyrn/`. Project-local `.vyrn/`
+is for repository-specific overrides and local runtime artifacts such as debug
+traces. **Global overrides local** for all vyrn-specific settings.
 
 ### 6.2 `config.toml`
 
@@ -115,6 +119,7 @@ auto_refresh = false       # Only refresh when agent calls refresh_manifest
 Users define named model profiles:
 
 ```toml
+# ~/.vyrn/models.toml
 [models.llama3]
 base_url = "http://localhost:11434/v1"
 model = "llama3.2"
@@ -161,13 +166,17 @@ All tool descriptions in the system prompt must be as short as possible. Token c
 ### 7.1 `read_file`
 Read the contents of a file at a given path.
 
-### 7.2 `write_file`
+### 7.2 `read_image`
+Attach one or more image files to the current model turn as OpenAI-compatible
+image content while keeping transcript text compact.
+
+### 7.3 `write_file`
 Write content to a file, creating it if it does not exist.
 
-### 7.3 `edit_file`
+### 7.4 `edit_file`
 Replace a specific string in a file with new content. Requires exact match.
 
-### 7.4 `batch`
+### 7.5 `batch`
 Execute one or more shell commands in sequence on the host machine. Raw passthrough — no sandboxing, no step structure. The model is responsible for safe usage.
 
 ```json
@@ -185,7 +194,16 @@ Returns stdout and stderr per command. If a command fails, subsequent commands s
 
 The `batch` tool is the primary extensibility primitive. Anything not in the core tools — downloading, installing, running scripts, interacting with browsers, system calls — goes through `batch`. Commands run from the current working directory by default unless the command explicitly changes directories or uses an absolute path.
 
-### 7.5 `refresh_manifest`
+### 7.6 `ask_user`
+Ask the human for clarification during an active turn. The tool supports one or
+more questions with optional choices, and the terminal UI always provides a
+freeform reply path.
+
+Use this only when a human decision materially changes the next action. Facts
+that can be discovered from the repo or host environment should be resolved with
+tools.
+
+### 7.7 `refresh_manifest`
 Rescan the host machine for available tools and reinject a compact manifest into the system prompt. Replaces the previous manifest — does not append. The agent calls this when it suspects the environment has changed (e.g. after installing a new tool via `batch`).
 
 ---
@@ -324,6 +342,8 @@ This is tracked per-request and accumulated as a session total.
 vyrn runs as an interactive terminal session. The user enters requests, the agent responds, executes tools, and streams output — all within a single persistent session.
 While a request is running, `Esc` cancels the active turn and returns to the
 composer. In the composer, Up/Down recalls previous non-command prompts.
+When the model calls `ask_user`, vyrn renders a clarification prompt with
+selectable options and a freeform reply path, then continues the same turn.
 
 ```
 vyrn
@@ -360,9 +380,10 @@ This is a permanent fixture in the UI — not hidden, not optional. It is a core
 vyrn --models
 ```
 
-Lists all configured model profiles from `models.toml` and lets the user select
-one with Up/Down and Enter. `--model` is accepted as an alias. Can also be
-invoked mid-session via a `/model` command.
+Lists all configured model profiles from `~/.vyrn/models.toml` plus any
+project-local override file and lets the user select one with Up/Down and Enter.
+`--model` is accepted as an alias. Can also be invoked mid-session via a
+`/model` command.
 
 ### 11.5 CLI Commands
 
@@ -372,18 +393,39 @@ invoked mid-session via a `/model` command.
 | `vyrn --models` | Select model before starting; `--model` is an alias |
 | `vyrn --context 2048` | Override context budget for this session |
 | `vyrn --verbose` | Show full token counts and raw summaries |
+| `vyrn --debug` | Show provider/network details and write structured LLM trace JSON |
+| `vyrn debug-viewer` | Generate a local static HTML viewer for debug trace JSON |
+| `vyrn eval evals/basic.json` | Run JSON-defined live agent evals and write traces |
 
 ### 11.6 In-Session Slash Commands
 
 | Command | Description |
 |---|---|
-| `/model` | Switch model mid-session |
+| `/models` | Switch model mid-session; `/model` is an alias |
 | `/stats` | Show full token usage for the session |
 | `/manifest` | Print current machine manifest |
 | `/refresh` | Trigger `refresh_manifest` manually |
 | `/skills` | List discovered skill sources and paths |
 | `/clear` | Reset session summary and history |
 | `/exit` | Exit vyrn |
+
+---
+
+### 11.7 Debug Observability
+
+Debug mode keeps the normal UI compact while making LLM traffic auditable:
+
+- Interactive `vyrn --debug` sessions write structured LLM trace JSON under
+  `.vyrn/debug/sessions/`.
+- `/clear` starts a new interactive trace file.
+- Eval cases write `<case-id>/llm-trace.json` under `.vyrn/eval-runs/` unless
+  `--no-debug` is used.
+- `vyrn debug-viewer` writes `.vyrn/debug/viewer.html`, creates
+  `.vyrn/debug/sessions/` and `.vyrn/eval-runs/` if missing, and shows those
+  default trace locations plus recent trace files when available.
+- Trace files include OpenAI-compatible request bodies, parsed responses, token
+  usage or estimates, call timing, action type, and harness metadata. API keys
+  and authorization headers are not written.
 
 ---
 

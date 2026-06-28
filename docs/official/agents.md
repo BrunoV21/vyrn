@@ -29,7 +29,8 @@ cargo test --test e2e_repl -- --nocapture
 ```
 
 This starts a fake local OpenAI-compatible streaming server and verifies a real `vyrn`
-binary session can execute a model-requested file tool call.
+binary session can execute model-requested tool calls, including clarification
+handoff through `ask_user`.
 
 Published package shape:
 
@@ -73,6 +74,7 @@ vyrn --models
 - vyrn is an interactive terminal agent, not a GUI or hosted service.
 - Keep the always-loaded tool surface minimal.
 - Prefer `batch` for host work that does not need a dedicated compact tool.
+- Use `ask_user` only when a human decision materially changes the next action; facts should be discovered with tools.
 - Preserve the user's original high-level session goal in summaries.
 - Show token savings in the composer status row after each completed request.
 - Treat MCP runtime tool execution as Phase 2; current code parses MCP metadata for the manifest.

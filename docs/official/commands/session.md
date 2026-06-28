@@ -19,6 +19,9 @@ keyboard input. It keeps normal terminal scrollback, streams model output live, 
 live slash-command completion with `Tab` acceptance, and provides inline `/models`
 selection. When stdin or stdout is not a TTY, it falls back to the plain text
 prompt for scripts and tests.
+During a turn, the agent can call `ask_user` to request clarification. In a real
+terminal, vyrn renders selectable options plus an always-available freeform
+reply. In plain text mode, type an option number or any freeform answer.
 Vision-capable models can receive images in the current message through `Ctrl+V`
 clipboard image paste or by mentioning image file paths in the prompt.
 While a turn is running, press `Esc` to cancel it and return to the composer. In
@@ -30,8 +33,9 @@ configured default, then the first configured model.
 
 ## `vyrn --models`
 
-Lists configured model profiles from `models.toml` and lets the user pick one with
-Up/Down and Enter. `--model` is accepted as an alias.
+Lists configured model profiles from `~/.vyrn/models.toml` plus any project-local
+override file and lets the user pick one with Up/Down and Enter. `--model` is
+accepted as an alias.
 
 ```bash
 vyrn --models
@@ -99,4 +103,24 @@ cargo run -- --debug
 ```
 
 Use this when a provider request fails and you need the request URL, network error kind,
-or non-2xx response body.
+or non-2xx response body. Debug mode also writes structured LLM traces to
+`.vyrn/debug/sessions/`. Each interactive session gets one JSON file, and `/clear`
+starts a new trace file.
+
+## `vyrn debug-viewer`
+
+Writes a local static HTML viewer for debug trace JSON and prints its path.
+
+```bash
+vyrn debug-viewer
+```
+
+Open the printed `viewer.html`, then load a session trace from
+`.vyrn/debug/sessions/` or an eval case `llm-trace.json` file. The viewer is
+local-only and uses a browser file picker; it does not start a server.
+
+Running `vyrn debug-viewer` also creates `.vyrn/debug/sessions/` and
+`.vyrn/eval-runs/` if they do not exist. The generated page shows those default
+locations and embeds recent trace file paths when available. Browsers do not allow
+static pages to force the native file picker to start in a specific directory, so
+use the displayed paths or drag a trace JSON file into the page.

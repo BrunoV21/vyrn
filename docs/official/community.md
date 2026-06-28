@@ -14,4 +14,4 @@ vyrn is early Rust package infrastructure. Feedback should stay grounded in the 
 - The local model or endpoint used.
 - Context budget and approximate session length.
 - Token stats from the affected turn.
-- Relevant `.vyrn/config.toml`, `.vyrn/models.toml`, or `.mcp.json` snippets with secrets removed.
+- Relevant `~/.vyrn/models.toml`, `.vyrn/config.toml`, project override files, or `.mcp.json` snippets with secrets removed.

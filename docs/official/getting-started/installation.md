@@ -44,9 +44,13 @@ vyrn --help
 
 ## Model endpoint
 
-vyrn expects an OpenAI-compatible chat completions API. Local endpoints commonly use an empty API key:
+vyrn expects an OpenAI-compatible chat completions API. Store normal model
+profiles globally in `~/.vyrn/models.toml`; use project-local `.vyrn/models.toml`
+only for repository-specific overrides. Local endpoints commonly use an empty API
+key:
 
 ```toml
+# ~/.vyrn/models.toml
 [models.local]
 base_url = "http://localhost:11434/v1"
 model = "llama3.2"

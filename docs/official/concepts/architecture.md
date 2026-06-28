@@ -19,10 +19,11 @@ flowchart TD
 
 | Component | Responsibility |
 |---|---|
-| Interactive REPL | Reads user requests, streams model output, displays tool activity and token stats. |
+| Interactive REPL | Reads user requests, streams model output, displays tool activity, clarification prompts, and token stats. |
 | Context manager | Maintains rolling summaries and adjusts pruning as the context budget tightens. |
 | LLM client | Uses OpenAI `/v1/chat/completions` compatible streaming. |
-| Tool executor | Runs the compact core toolset and `batch`. |
+| Debug traces | Records debug-only structured LLM request/response JSON for REPL sessions and eval cases. |
+| Tool executor | Runs the compact core toolset, `batch`, and human clarification handoff. |
 | Machine manifest | Injects a tiny environment snapshot into the prompt. |
 | Skills loader | Implements Agent Skills progressive disclosure. |
 | MCP metadata | Parses `.mcp.json` server metadata for the manifest. MCP server execution is Phase 2. |
@@ -32,7 +33,8 @@ flowchart TD
 - Line-oriented interactive REPL.
 - Native-scrollback terminal UI for TTY sessions, with slash autocomplete and plain-text fallback for pipes.
 - OpenAI-compatible streaming chat completions client.
-- Core tools: `read_file`, `read_image`, `write_file`, `edit_file`, `batch`, `refresh_manifest`.
+- Debug-only LLM trace JSON plus a local static trace viewer.
+- Core tools: `read_file`, `read_image`, `write_file`, `edit_file`, `batch`, `ask_user`, `refresh_manifest`.
 - Template-based prompt assembly for agent and summary prompts.
 - Rolling summary context manager and token savings ledger.
 - Agent Skills discovery by name and description.

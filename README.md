@@ -16,7 +16,7 @@ Most agent tools assume they can spend 128K+ context windows and still feel fast
 
 vyrn is a token-efficient, model-agnostic CLI agent built in Rust for developers and terminal-native users running local or small LLMs. It keeps the always-loaded prompt and tool surface tiny, uses raw shell batching as the main power primitive, and tracks token savings as a first-class product signal.
 
-The interactive interface uses native terminal scrollback with `crossterm` raw-mode input. Real terminals get styled prompts, live streaming output, live slash-command completion, inline `/models` selection, running indicators, compact tool previews, and a composer status row; piped or scripted runs fall back to plain text.
+The interactive interface uses native terminal scrollback with `crossterm` raw-mode input. Real terminals get styled prompts, live streaming output, live slash-command completion, inline `/models` selection, running indicators, compact tool previews, clarification prompts, and a composer status row; piped or scripted runs fall back to plain text.
 
 ```text
 ┌──────────────┐   compact prompt    ┌──────────────┐
@@ -39,6 +39,7 @@ The interactive interface uses native terminal scrollback with `crossterm` raw-m
 - **Model-agnostic:** any OpenAI-compatible endpoint can work, including Ollama, LM Studio, Groq, Together AI, OpenRouter, or a custom local server.
 - **Raw power primitive:** `batch` is the main extension point for shell work, installs, scripts, and host inspection.
 - **Terminal UI:** real terminal sessions use a styled native-scrollback chat surface instead of a bare line prompt.
+- **Human clarification:** the model can call `ask_user` mid-turn to choose from options or accept a freeform reply.
 - **Rolling summaries:** conversation history is compressed into a living summary instead of resent wholesale on every turn.
 - **Visible savings:** each completed request reports tokens spent, history saved, session history saved, and current context footprint.
 - **Open standards:** skills follow Agent Skills protocol, and MCP config follows `.mcp.json` conventions.
@@ -64,15 +65,22 @@ vyrn
 
 ## Quick Start
 
-Create a model profile for an OpenAI-compatible local endpoint:
+Create a global model profile for an OpenAI-compatible local endpoint:
+
+```bash
+mkdir -p ~/.vyrn
+```
 
 ```toml
-# .vyrn/models.toml
+# ~/.vyrn/models.toml
 [models.llama3]
 base_url = "http://localhost:11434/v1"
 model = "llama3.2"
 api_key = ""
 ```
+
+Use project-local `.vyrn/models.toml` only when a repository needs a specific
+override.
 
 Start an interactive session:
 
@@ -95,9 +103,13 @@ Expected session shape:
 +------------------------------------------------------+
 
 model glm-4-5-air  context 4096
-> /mo<Tab>
+> /mo
 > /models
 ```
+
+Slash command completion appears beside the typed prefix as you type. Press `Tab`
+to accept the shown command without running it, or press `Enter` to run the shown
+completion directly.
 
 The composer status row under the input box shows cumulative model I/O for the
 request, prior-history summary savings, session history savings, and the current
@@ -109,6 +121,11 @@ turn spent: 225 | turn history saved: 29 | session history saved: 18 | context: 
 
 Press `Esc` while a turn is running to cancel it and return to the composer. Press
 Up/Down in the composer to recall previous non-command prompts.
+
+When the model needs a decision that cannot be discovered with tools, it can call
+`ask_user` during the same turn. In a real terminal, vyrn renders selectable options
+plus an always-available `Other` freeform reply. In plain text mode, type an option
+number or any freeform answer.
 
 Vision-capable models can receive images as part of the current message. In the TTY
 composer, press `Ctrl+V` with an image on the clipboard to attach it. You can also paste
@@ -145,7 +162,21 @@ cargo run -- --debug
 ```
 
 Debug mode shows the request URL, lower-level network error details, and provider
-response bodies for non-2xx HTTP responses.
+response bodies for non-2xx HTTP responses. It also writes structured LLM trace
+JSON under `.vyrn/debug/sessions/`. Eval runs write per-case `llm-trace.json`
+files under `.vyrn/eval-runs/` unless `--no-debug` is used.
+
+Write the local trace viewer:
+
+```bash
+cargo run -- debug-viewer
+```
+
+The viewer is a static local HTML file at `.vyrn/debug/viewer.html`. Generating it
+also creates `.vyrn/debug/sessions/` and `.vyrn/eval-runs/`, displays those paths
+in the page, and embeds recent trace file paths when available. Browsers do not
+let static pages force the native file picker to open a specific directory, so use
+the path hints or drag a trace JSON file into the viewer.
 
 Run the deterministic end-to-end REPL test:
 
@@ -179,7 +210,8 @@ The docs use a terminal-brutalist standard: black surfaces, violet brand/action 
 
 - Rust CLI package with a styled native-scrollback TTY interface and a plain-text fallback for pipes.
 - OpenAI-compatible streaming chat completions client.
-- Core tools: `read_file`, `read_image`, `write_file`, `edit_file`, `batch`, `refresh_manifest`.
+- Debug-only structured LLM trace JSON for REPL sessions and eval cases, plus a local static trace viewer.
+- Core tools: `read_file`, `read_image`, `write_file`, `edit_file`, `batch`, `ask_user`, `refresh_manifest`.
 - Compact machine manifest for binaries, skills, and MCP server metadata.
 - Config/model loading from `.vyrn/` and `~/.vyrn/`, with global vyrn config overriding local settings.
 - Rolling summary context manager and visible token savings ledger.
