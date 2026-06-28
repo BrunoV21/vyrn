@@ -80,6 +80,93 @@ api_key = ""
 }
 
 #[test]
+fn repl_plain_mode_answers_ask_user_tool_and_continues_turn() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let server_bodies = Arc::clone(&bodies);
+    let server = thread::spawn(move || {
+        for index in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let body = read_http_body(&mut stream);
+            server_bodies.lock().unwrap().push(body.clone());
+            match index {
+                0 => write_sse(
+                    &mut stream,
+                    r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_ask","type":"function","function":{"name":"ask_user","arguments":"{\"questions\":[{\"id\":\"scope\",\"header\":\"Scope\",\"question\":\"Which approach should I use?\",\"options\":[{\"label\":\"Core tool\",\"description\":\"Always available\"},{\"label\":\"Slash command\"}]}]}"}}]}}]}"#,
+                ),
+                1 => write_json(
+                    &mut stream,
+                    r#"{"choices":[{"message":{"role":"assistant","content":"- User chose Core tool for scope clarification."}}],"usage":{"prompt_tokens":90,"completion_tokens":16,"total_tokens":106}}"#,
+                ),
+                _ => write_sse(
+                    &mut stream,
+                    r#"data: {"choices":[{"delta":{"content":"Continuing with the core tool approach."}}]}"#,
+                ),
+            }
+        }
+    });
+
+    let temp = tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".vyrn")).unwrap();
+    std::fs::write(
+        temp.path().join(".vyrn/models.toml"),
+        format!(
+            r#"[models.llama3]
+base_url = "http://{addr}/v1"
+model = "fake-small"
+api_key = ""
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .current_dir(temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin
+            .write_all(b"clarify before continuing\n1\n/exit\n")
+            .unwrap();
+    }
+
+    let output = child.wait_with_output().unwrap();
+    server.join().unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[ask_user 1/1] Scope"), "{stdout}");
+    assert!(
+        stdout.contains("1. Core tool - Always available"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("[ask_user ok]"), "{stdout}");
+    assert!(
+        stdout.contains("Continuing with the core tool approach."),
+        "{stdout}"
+    );
+
+    let bodies = bodies.lock().unwrap();
+    assert!(bodies[0].contains("\"name\":\"ask_user\""), "{}", bodies[0]);
+    assert!(
+        bodies[2].contains("\"tool_call_id\":\"call_ask\""),
+        "{}",
+        bodies[2]
+    );
+    assert!(bodies[2].contains("Core tool"), "{}", bodies[2]);
+}
+
+#[test]
 fn stats_command_prints_token_contributors() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -219,6 +306,23 @@ api_key = ""
     assert!(log.contains("agent_request round=0"), "{log}");
     assert!(log.contains("agent_response round=0"), "{log}");
     assert!(log.contains("turn_complete"), "{log}");
+
+    let sessions_dir = temp.path().join(".vyrn/debug/sessions");
+    let trace_path = std::fs::read_dir(&sessions_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .unwrap();
+    let trace: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(trace_path).unwrap()).unwrap();
+    assert_eq!(trace["run_kind"], "interactive");
+    assert_eq!(trace["calls"][0]["action_type"], "agent_turn");
+    assert_eq!(trace["calls"][0]["request"]["model"], "fake-small");
+    assert_eq!(trace["calls"][0]["request"]["stream"], true);
+    assert_eq!(
+        trace["calls"][0]["response"]["choices"][0]["message"]["content"],
+        "Logged."
+    );
 }
 
 #[test]

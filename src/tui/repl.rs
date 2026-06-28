@@ -10,10 +10,13 @@ use crate::agent::turn::{
 };
 use crate::app::App;
 use crate::config::{ModelProfile, ModelRegistry, ModelState};
+use crate::debug_trace::{TraceMetadata, TraceRecorder};
 use crate::llm::{
     ChatCompletionRequest, ChatMessage, ImageAttachment, LlmError, StreamEvent, ToolCall,
 };
-use crate::tools::{MachineManifest, ToolResult};
+use crate::tools::{
+    ASK_USER_TOOL_NAME, AskUserAnswer, AskUserRequest, AskUserResponse, MachineManifest, ToolResult,
+};
 use crate::vision;
 use crossterm::cursor::{MoveToColumn, MoveUp, RestorePosition, SavePosition};
 use crossterm::event::{
@@ -33,7 +36,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 
 const SLASH_COMMANDS: &[&str] = &[
     "/models",
@@ -100,6 +103,8 @@ const SYSTEM_SURFACE: Color = VY_SURFACE;
 pub struct Repl {
     app: App,
     prompt_history: Vec<String>,
+    plain_lines: Option<Lines<BufReader<tokio::io::Stdin>>>,
+    input_pause: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -114,6 +119,8 @@ impl Repl {
         Self {
             app,
             prompt_history,
+            plain_lines: None,
+            input_pause: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -125,11 +132,15 @@ impl Repl {
             self.app.config.context.max_tokens,
             self.app.verbose
         ));
-        if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        let result = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
             self.run_inline_tui().await
         } else {
             self.run_plain().await
+        };
+        if let Some(trace) = self.app.trace.as_mut() {
+            let _ = trace.finish("exit");
         }
+        result
     }
 
     async fn run_plain(&mut self) -> anyhow::Result<()> {
@@ -140,13 +151,12 @@ impl Repl {
             self.app.config.context.max_tokens,
         );
 
-        let stdin = BufReader::new(tokio::io::stdin());
-        let mut lines = stdin.lines();
+        self.plain_lines = Some(BufReader::new(tokio::io::stdin()).lines());
 
         loop {
             print!("you: ");
             std::io::stdout().flush()?;
-            let Some(line) = lines.next_line().await? else {
+            let Some(line) = self.next_plain_line().await? else {
                 break;
             };
             let input = line.trim();
@@ -172,6 +182,7 @@ impl Repl {
             }
         }
 
+        self.plain_lines = None;
         Ok(())
     }
 
@@ -205,7 +216,11 @@ impl Repl {
             let mut assistant_renderer = MarkdownStreamRenderer::new();
             let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
             let cancel_stop = Arc::new(AtomicBool::new(false));
-            let cancel_handle = spawn_escape_listener(Arc::clone(&cancel_stop), cancel_tx);
+            let cancel_handle = spawn_escape_listener(
+                Arc::clone(&cancel_stop),
+                Arc::clone(&self.input_pause),
+                cancel_tx,
+            );
             let turn = self.handle_user_turn_with(input, |update| match update {
                 TuiUpdate::SummaryStart => {
                     if let Some(spinner) = spinner.take() {
@@ -256,6 +271,11 @@ impl Repl {
                         spinner.stop();
                     }
                     spinner = Some(Spinner::start(format!("running tool {name}")));
+                }
+                TuiUpdate::ToolInputStart => {
+                    if let Some(spinner) = spinner.take() {
+                        spinner.stop();
+                    }
                 }
                 TuiUpdate::ToolOk { name, preview } => {
                     if let Some(spinner) = spinner.take() {
@@ -327,6 +347,7 @@ impl Repl {
             "/clear" => {
                 self.app.context.clear();
                 self.app.stats = Default::default();
+                self.rotate_debug_trace("clear");
                 println!("cleared session context");
                 Ok(false)
             }
@@ -340,6 +361,13 @@ impl Repl {
                 Ok(false)
             }
         }
+    }
+
+    async fn next_plain_line(&mut self) -> anyhow::Result<Option<String>> {
+        let Some(lines) = self.plain_lines.as_mut() else {
+            return Ok(None);
+        };
+        Ok(lines.next_line().await?)
     }
 
     async fn handle_inline_slash_command(
@@ -374,6 +402,7 @@ impl Repl {
             "/clear" => {
                 self.app.context.clear();
                 self.app.stats = Default::default();
+                self.rotate_debug_trace("clear");
                 *composer_status = self.composer_status_line();
                 clear_screen()?;
                 print_welcome(&self.app)?;
@@ -408,6 +437,7 @@ impl Repl {
             }
             TuiUpdate::AssistantDone => println!(),
             TuiUpdate::ToolStarted(name) => println!("\n[tool {name}]"),
+            TuiUpdate::ToolInputStart => {}
             TuiUpdate::ToolOk { name, preview } => {
                 println!("[{name} ok]");
                 if !preview.is_empty() {
@@ -460,7 +490,18 @@ impl Repl {
         if let Some(summary_usage) = self
             .app
             .context
-            .refresh_summary(&self.app.client, initial_prompt.estimated_tokens.tokens)
+            .refresh_summary(
+                &self.app.client,
+                initial_prompt.estimated_tokens.tokens,
+                self.app.trace.as_mut(),
+                TraceMetadata {
+                    action_type: "summary_refresh",
+                    label: Some("summary".to_string()),
+                    turn_index: Some(self.app.stats.turns.len()),
+                    context_limit: Some(self.app.config.context.max_tokens),
+                    ..TraceMetadata::default()
+                },
+            )
             .await?
         {
             let summary_total = summary_usage.input_tokens + summary_usage.output_tokens;
@@ -534,26 +575,45 @@ impl Repl {
             }
 
             emit(TuiUpdate::AssistantStart);
-            let response = self
-                .app
-                .client
-                .stream_chat(
-                    ChatCompletionRequest {
-                        model: String::new(),
-                        messages: messages.clone(),
-                        tools: tool_schemas.clone(),
-                        tool_choice: None,
-                        stream: true,
-                    },
-                    |event| match event {
-                        StreamEvent::TextDelta(delta) => emit(TuiUpdate::AssistantDelta(delta)),
-                        StreamEvent::ToolCallDone(call) => {
-                            emit(TuiUpdate::ToolStarted(call.function.name));
-                        }
-                        StreamEvent::Finished => {}
+            let request = ChatCompletionRequest {
+                model: String::new(),
+                messages: messages.clone(),
+                tools: tool_schemas.clone(),
+                tool_choice: None,
+                stream: true,
+            };
+            let pending_trace = self.app.trace.as_ref().map(|trace| {
+                trace.begin_call(
+                    &self.app.client,
+                    &request,
+                    true,
+                    TraceMetadata {
+                        action_type: "agent_turn",
+                        label: Some(format!("agent-{round}")),
+                        turn_index: Some(self.app.stats.turns.len()),
+                        round_index: Some(round),
+                        estimated_input_tokens: Some(request_tokens),
+                        context_limit: Some(self.app.config.context.max_tokens),
+                        token_breakdown: Some(request_breakdown),
+                        ..TraceMetadata::default()
                     },
                 )
-                .await?;
+            });
+            let response_result = self
+                .app
+                .client
+                .stream_chat(request, |event| match event {
+                    StreamEvent::TextDelta(delta) => emit(TuiUpdate::AssistantDelta(delta)),
+                    StreamEvent::ToolCallDone(call) => {
+                        emit(TuiUpdate::ToolStarted(call.function.name));
+                    }
+                    StreamEvent::Finished => {}
+                })
+                .await;
+            if let (Some(trace), Some(pending_trace)) = (self.app.trace.as_mut(), pending_trace) {
+                let _ = trace.finish_call(pending_trace, &response_result);
+            }
+            let response = response_result?;
             emit(TuiUpdate::AssistantDone);
             last_request_messages = messages;
 
@@ -599,7 +659,13 @@ impl Repl {
             let assistant_tool_message = message;
             current_tool_batch = vec![assistant_tool_message.clone()];
             for (tool_index, call) in tool_calls.into_iter().enumerate() {
+                if call.function.name == ASK_USER_TOOL_NAME {
+                    emit(TuiUpdate::ToolInputStart);
+                }
                 let result = self.execute_tool_call(&call).await;
+                if matches!(result, Err(crate::tools::ToolError::Canceled)) {
+                    return Err(LlmError::Canceled);
+                }
                 let mut incremental_batch = vec![assistant_tool_message.clone()];
                 match &result {
                     Ok(tool_result) => {
@@ -650,6 +716,8 @@ impl Repl {
                         &assistant_tool_message,
                         &mut usage,
                         self.app.config.context.max_tokens,
+                        round,
+                        tool_index,
                     )
                     .await?;
                 self.debug_log(format!(
@@ -724,12 +792,14 @@ impl Repl {
     }
 
     async fn update_turn_scratchpad(
-        &self,
+        &mut self,
         scratchpad: &TurnScratchpad,
         consumed_tool_batch: &[ChatMessage],
         assistant_response: &ChatMessage,
         usage: &mut TurnUsage,
         max_tokens: usize,
+        round: usize,
+        tool_index: usize,
     ) -> Result<TurnScratchpad, LlmError> {
         let source = turn_scratchpad_update_source(consumed_tool_batch, assistant_response);
         let messages =
@@ -745,17 +815,35 @@ impl Repl {
                 .unwrap_or_default(),
             scratchpad.summary.chars().count()
         ));
-        let response = self
-            .app
-            .client
-            .complete_chat(ChatCompletionRequest {
-                model: String::new(),
-                messages,
-                tools: Vec::new(),
-                tool_choice: None,
-                stream: false,
-            })
-            .await?;
+        let request = ChatCompletionRequest {
+            model: String::new(),
+            messages,
+            tools: Vec::new(),
+            tool_choice: None,
+            stream: false,
+        };
+        let pending_trace = self.app.trace.as_ref().map(|trace| {
+            trace.begin_call(
+                &self.app.client,
+                &request,
+                false,
+                TraceMetadata {
+                    action_type: "turn_scratchpad",
+                    label: Some("turn-scratchpad".to_string()),
+                    turn_index: Some(self.app.stats.turns.len()),
+                    round_index: Some(round),
+                    tool_index: Some(tool_index),
+                    estimated_input_tokens: Some(estimated_input_tokens),
+                    context_limit: Some(max_tokens),
+                    ..TraceMetadata::default()
+                },
+            )
+        });
+        let response_result = self.app.client.complete_chat(request).await;
+        if let (Some(trace), Some(pending_trace)) = (self.app.trace.as_mut(), pending_trace) {
+            let _ = trace.finish_call(pending_trace, &response_result);
+        }
+        let response = response_result?;
         let summary = response
             .choices
             .first()
@@ -809,6 +897,14 @@ impl Repl {
         let _ = writeln!(file, "[{}] {}", unix_timestamp_millis(), event.as_ref());
     }
 
+    fn rotate_debug_trace(&mut self, reason: &str) {
+        let Some(trace) = self.app.trace.as_mut() else {
+            return;
+        };
+        let _ = trace.finish(reason);
+        self.app.trace = TraceRecorder::interactive(&self.app.sources, &self.app.client).ok();
+    }
+
     async fn execute_tool_call(
         &mut self,
         call: &ToolCall,
@@ -823,11 +919,127 @@ impl Repl {
                 }
             })?
         };
+        if call.function.name == ASK_USER_TOOL_NAME {
+            return self.execute_ask_user(input).await;
+        }
         let result = self.app.tools.execute(&call.function.name, input).await?;
         if result.refresh_manifest {
             self.refresh_manifest();
         }
         Ok(result)
+    }
+
+    async fn execute_ask_user(
+        &mut self,
+        input: Value,
+    ) -> Result<ToolResult, crate::tools::ToolError> {
+        let request = AskUserRequest::parse(input)?;
+        let response = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+            self.ask_user_inline(&request)?
+        } else {
+            self.ask_user_plain(&request).await?
+        };
+        response.into_tool_result()
+    }
+
+    async fn ask_user_plain(
+        &mut self,
+        request: &AskUserRequest,
+    ) -> Result<AskUserResponse, crate::tools::ToolError> {
+        let mut answers = Vec::with_capacity(request.questions.len());
+        for (idx, question) in request.questions.iter().enumerate() {
+            println!(
+                "[ask_user {}/{}] {}",
+                idx + 1,
+                request.questions.len(),
+                question
+                    .header
+                    .as_deref()
+                    .filter(|header| !header.trim().is_empty())
+                    .unwrap_or("clarification")
+            );
+            println!("{}", question.question);
+            for (option_idx, option) in question.options.iter().enumerate() {
+                if let Some(description) = option.description.as_deref() {
+                    println!("{}. {} - {}", option_idx + 1, option.label, description);
+                } else {
+                    println!("{}. {}", option_idx + 1, option.label);
+                }
+            }
+            if question.options.is_empty() {
+                print!("reply: ");
+            } else {
+                println!("+. Other");
+                print!("select option or type reply: ");
+            }
+            std::io::stdout().flush()?;
+            let Some(line) =
+                self.next_plain_line()
+                    .await
+                    .map_err(|error| crate::tools::ToolError::Failed {
+                        tool: ASK_USER_TOOL_NAME.to_string(),
+                        message: error.to_string(),
+                    })?
+            else {
+                return Err(crate::tools::ToolError::Canceled);
+            };
+            let reply = line.trim().to_string();
+            if let Ok(selected) = reply.parse::<usize>()
+                && let Some(option) = question.options.get(selected.saturating_sub(1))
+            {
+                answers.push(AskUserAnswer::Option {
+                    id: question.id.clone(),
+                    answer: option.label.clone(),
+                    option_index: selected.saturating_sub(1),
+                    option_label: option.label.clone(),
+                });
+                continue;
+            }
+            answers.push(AskUserAnswer::Freeform {
+                id: question.id.clone(),
+                answer: reply,
+            });
+        }
+        Ok(AskUserResponse { answers })
+    }
+
+    fn ask_user_inline(
+        &mut self,
+        request: &AskUserRequest,
+    ) -> Result<AskUserResponse, crate::tools::ToolError> {
+        let _pause = InputPauseGuard::new(&self.input_pause);
+        let mut answers = Vec::with_capacity(request.questions.len());
+        for (idx, question) in request.questions.iter().enumerate() {
+            let answer = if question.options.is_empty() {
+                let reply = read_clarification_freeform(question, idx, request.questions.len())?;
+                AskUserAnswer::Freeform {
+                    id: question.id.clone(),
+                    answer: reply,
+                }
+            } else {
+                match select_clarification_option(question, idx, request.questions.len())? {
+                    ClarificationChoice::Option(option_index) => {
+                        let option = &question.options[option_index];
+                        AskUserAnswer::Option {
+                            id: question.id.clone(),
+                            answer: option.label.clone(),
+                            option_index,
+                            option_label: option.label.clone(),
+                        }
+                    }
+                    ClarificationChoice::Other => {
+                        let reply =
+                            read_clarification_freeform(question, idx, request.questions.len())?;
+                        AskUserAnswer::Freeform {
+                            id: question.id.clone(),
+                            answer: reply,
+                        }
+                    }
+                }
+            };
+            answers.push(answer);
+        }
+        Ok(AskUserResponse { answers })
     }
 
     fn refresh_manifest(&mut self) {
@@ -1135,10 +1347,35 @@ enum TuiUpdate {
     AssistantDelta(String),
     AssistantDone,
     ToolStarted(String),
+    ToolInputStart,
     ToolOk { name: String, preview: String },
     ToolError { name: String, error: String },
     Stats(String),
     Summary(String),
+}
+
+enum ClarificationChoice {
+    Option(usize),
+    Other,
+}
+
+struct InputPauseGuard {
+    pause: Arc<AtomicBool>,
+}
+
+impl InputPauseGuard {
+    fn new(pause: &Arc<AtomicBool>) -> Self {
+        pause.store(true, Ordering::Relaxed);
+        Self {
+            pause: Arc::clone(pause),
+        }
+    }
+}
+
+impl Drop for InputPauseGuard {
+    fn drop(&mut self) {
+        self.pause.store(false, Ordering::Relaxed);
+    }
 }
 
 struct RawModeGuard;
@@ -1160,11 +1397,16 @@ impl Drop for RawModeGuard {
 
 fn spawn_escape_listener(
     stop: Arc<AtomicBool>,
+    pause: Arc<AtomicBool>,
     cancel_tx: tokio::sync::oneshot::Sender<()>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut cancel_tx = Some(cancel_tx);
         while !stop.load(Ordering::Relaxed) {
+            if pause.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
             match event::poll(Duration::from_millis(50)) {
                 Ok(true) => {
                     let Ok(Event::Key(key)) = event::read() else {
@@ -1182,6 +1424,259 @@ fn spawn_escape_listener(
             }
         }
     })
+}
+
+fn select_clarification_option(
+    question: &crate::tools::AskUserQuestion,
+    question_index: usize,
+    question_count: usize,
+) -> Result<ClarificationChoice, crate::tools::ToolError> {
+    let mut selected = 0usize;
+    render_clarification_picker(question, question_index, question_count, selected, false)?;
+    let row_count = clarification_row_count(question);
+    loop {
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                println!("\r");
+                return Err(crate::tools::ToolError::Canceled);
+            }
+            KeyCode::Enter => {
+                println!("\r");
+                if selected < question.options.len() {
+                    return Ok(ClarificationChoice::Option(selected));
+                }
+                return Ok(ClarificationChoice::Other);
+            }
+            KeyCode::Up => {
+                selected = if selected == 0 {
+                    row_count - 1
+                } else {
+                    selected - 1
+                };
+                render_clarification_picker(
+                    question,
+                    question_index,
+                    question_count,
+                    selected,
+                    true,
+                )?;
+            }
+            KeyCode::Down => {
+                selected = (selected + 1) % row_count;
+                render_clarification_picker(
+                    question,
+                    question_index,
+                    question_count,
+                    selected,
+                    true,
+                )?;
+            }
+            KeyCode::Home => {
+                selected = 0;
+                render_clarification_picker(
+                    question,
+                    question_index,
+                    question_count,
+                    selected,
+                    true,
+                )?;
+            }
+            KeyCode::End => {
+                selected = row_count - 1;
+                render_clarification_picker(
+                    question,
+                    question_index,
+                    question_count,
+                    selected,
+                    true,
+                )?;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn read_clarification_freeform(
+    question: &crate::tools::AskUserQuestion,
+    question_index: usize,
+    question_count: usize,
+) -> Result<String, crate::tools::ToolError> {
+    let mut input = String::new();
+    render_clarification_freeform(question, question_index, question_count, &input, false)?;
+    loop {
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                println!("\r");
+                return Err(crate::tools::ToolError::Canceled);
+            }
+            KeyCode::Enter => {
+                println!("\r");
+                return Ok(input.trim().to_string());
+            }
+            KeyCode::Backspace => {
+                input.pop();
+                render_clarification_freeform(
+                    question,
+                    question_index,
+                    question_count,
+                    &input,
+                    true,
+                )?;
+            }
+            KeyCode::Char(ch) => {
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                    input.push(ch);
+                    render_clarification_freeform(
+                        question,
+                        question_index,
+                        question_count,
+                        &input,
+                        true,
+                    )?;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn render_clarification_picker(
+    question: &crate::tools::AskUserQuestion,
+    question_index: usize,
+    question_count: usize,
+    selected: usize,
+    redraw: bool,
+) -> Result<(), crate::tools::ToolError> {
+    if redraw {
+        execute!(
+            std::io::stdout(),
+            MoveUp(u16::try_from(clarification_row_count(question) + 3).unwrap_or(u16::MAX)),
+            MoveToColumn(0)
+        )?;
+    }
+    render_clarification_header(question, question_index, question_count)?;
+    let (width, _) = size().unwrap_or((100, 24));
+    let max_chars = usize::from(width).saturating_sub(4).max(1);
+    for (idx, option) in question.options.iter().enumerate() {
+        let mut row = option.label.clone();
+        if let Some(description) = option
+            .description
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            row.push_str(" - ");
+            row.push_str(description);
+        }
+        render_clarification_row(idx == selected, &truncate_display(&row, max_chars))?;
+    }
+    render_clarification_row(selected == question.options.len(), "+ Other...")?;
+    render_clarification_help("Use Up/Down to choose, Enter to select, Esc to cancel.")?;
+    Ok(())
+}
+
+fn render_clarification_freeform(
+    question: &crate::tools::AskUserQuestion,
+    question_index: usize,
+    question_count: usize,
+    input: &str,
+    redraw: bool,
+) -> Result<(), crate::tools::ToolError> {
+    if redraw {
+        execute!(std::io::stdout(), MoveUp(4), MoveToColumn(0))?;
+    }
+    render_clarification_header(question, question_index, question_count)?;
+    let (width, _) = size().unwrap_or((100, 24));
+    let max_chars = usize::from(width).saturating_sub(9).max(1);
+    execute!(
+        std::io::stdout(),
+        MoveToColumn(0),
+        Clear(ClearType::CurrentLine),
+        SetForegroundColor(VY_VIOLET),
+        Print("reply: "),
+        ResetColor,
+        Print(truncate_display(input, max_chars)),
+        Print("\r\n")
+    )?;
+    render_clarification_help("Type a reply, Enter to submit, Esc to cancel.")?;
+    Ok(())
+}
+
+fn render_clarification_header(
+    question: &crate::tools::AskUserQuestion,
+    question_index: usize,
+    question_count: usize,
+) -> Result<(), crate::tools::ToolError> {
+    let title = question
+        .header
+        .as_deref()
+        .filter(|header| !header.trim().is_empty())
+        .unwrap_or("clarification");
+    let (width, _) = size().unwrap_or((100, 24));
+    let max_chars = usize::from(width).saturating_sub(1).max(1);
+    execute!(
+        std::io::stdout(),
+        MoveToColumn(0),
+        Clear(ClearType::CurrentLine),
+        SetForegroundColor(STEEL_BLUE),
+        Print(format!(
+            "ask_user [{}/{}] {}",
+            question_index + 1,
+            question_count,
+            truncate_display(title, max_chars.saturating_sub(18))
+        )),
+        ResetColor,
+        Print("\r\n"),
+        MoveToColumn(0),
+        Clear(ClearType::CurrentLine),
+        Print(truncate_display(&question.question, max_chars)),
+        Print("\r\n")
+    )?;
+    Ok(())
+}
+
+fn render_clarification_row(selected: bool, text: &str) -> Result<(), crate::tools::ToolError> {
+    execute!(
+        std::io::stdout(),
+        MoveToColumn(0),
+        Clear(ClearType::CurrentLine)
+    )?;
+    if selected {
+        execute!(
+            std::io::stdout(),
+            SetForegroundColor(VY_VIOLET),
+            Print("> "),
+            Print(text),
+            ResetColor,
+            Print("\r\n")
+        )?;
+    } else {
+        execute!(std::io::stdout(), Print("  "), Print(text), Print("\r\n"))?;
+    }
+    Ok(())
+}
+
+fn render_clarification_help(text: &str) -> Result<(), crate::tools::ToolError> {
+    execute!(
+        std::io::stdout(),
+        MoveToColumn(0),
+        Clear(ClearType::CurrentLine),
+        SetForegroundColor(VY_TEXT_DIM),
+        Print(text),
+        ResetColor,
+        Print("\r\n")
+    )?;
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
+fn clarification_row_count(question: &crate::tools::AskUserQuestion) -> usize {
+    question.options.len() + 1
 }
 
 struct Spinner {

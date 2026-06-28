@@ -12,6 +12,7 @@ use crate::agent::turn::{
 };
 use crate::cli::EvalArgs;
 use crate::config::{ConfigSources, EffectiveConfig, ModelProfile, ModelRegistry};
+use crate::debug_trace::{TraceMetadata, TraceRecorder};
 use crate::llm::{
     ChatCompletionRequest, ChatMessage, ImageAttachment, LlmError, OpenAiClient, StreamEvent,
     ToolCall,
@@ -228,16 +229,26 @@ pub async fn run(args: EvalArgs, context_override: Option<usize>) -> anyhow::Res
             models.clone(),
             model.clone(),
             !args.no_debug,
+            trace_dir.join("llm-trace.json"),
         )?;
         let mut trace = runner.run_case(case.clone()).await;
         trace.duration_ms = case_start.elapsed().as_millis();
         if trace.error.is_none() {
-            trace.assertions = evaluate_assertions(&trace, &models, &model).await;
+            trace.assertions =
+                evaluate_assertions(&trace, &models, &model, runner.llm_trace.as_mut()).await;
             if trace.assertions.iter().any(|assertion| !assertion.passed) {
                 trace.error = Some("one or more assertions failed".to_string());
             }
         }
         trace.passed = trace.error.is_none();
+        if let Some(llm_trace) = runner.llm_trace.as_mut() {
+            let reason = if trace.error.is_some() {
+                "error"
+            } else {
+                "complete"
+            };
+            let _ = llm_trace.finish(reason);
+        }
         write_case_trace(&trace_dir, &trace)?;
 
         if trace.passed {
@@ -448,10 +459,20 @@ async fn evaluate_assertions(
     trace: &EvalTrace,
     models: &ModelRegistry,
     default_model: &ModelProfile,
+    mut llm_trace: Option<&mut TraceRecorder>,
 ) -> Vec<AssertionOutcome> {
     let mut outcomes = Vec::with_capacity(trace.case.assertions.len());
     for assertion in &trace.case.assertions {
-        outcomes.push(evaluate_assertion(assertion, trace, models, default_model).await);
+        outcomes.push(
+            evaluate_assertion(
+                assertion,
+                trace,
+                models,
+                default_model,
+                llm_trace.as_deref_mut(),
+            )
+            .await,
+        );
     }
     outcomes
 }
@@ -461,6 +482,7 @@ async fn evaluate_assertion(
     trace: &EvalTrace,
     models: &ModelRegistry,
     default_model: &ModelProfile,
+    llm_trace: Option<&mut TraceRecorder>,
 ) -> AssertionOutcome {
     match assertion {
         EvalAssertion::AssistantContains { value } => {
@@ -542,8 +564,15 @@ async fn evaluate_assertion(
             }
         }
         EvalAssertion::Judge { prompt, model } => {
-            let result =
-                judge_assertion(prompt, model.as_deref(), trace, models, default_model).await;
+            let result = judge_assertion(
+                prompt,
+                model.as_deref(),
+                trace,
+                models,
+                default_model,
+                llm_trace,
+            )
+            .await;
             match result {
                 Ok(passed) => AssertionOutcome {
                     assertion: assertion.clone(),
@@ -579,6 +608,7 @@ async fn judge_assertion(
     trace: &EvalTrace,
     models: &ModelRegistry,
     default_model: &ModelProfile,
+    llm_trace: Option<&mut TraceRecorder>,
 ) -> anyhow::Result<bool> {
     let profile = if let Some(model) = model {
         models
@@ -588,25 +618,43 @@ async fn judge_assertion(
         default_model.clone()
     };
     let client = OpenAiClient::new(profile);
-    let response = client
-        .complete_chat(ChatCompletionRequest {
-            model: String::new(),
-            messages: vec![
-                ChatMessage::system(
-                    "You judge a terminal agent eval. Return PASS or FAIL on the first line, then a concise reason.",
-                ),
-                ChatMessage::user(format!(
-                    "Assertion:\n{prompt}\n\nUser prompt:\n{}\n\nFinal assistant:\n{}\n\nTool calls:\n{}",
-                    trace.case.prompt,
-                    trace.final_assistant,
-                    serde_json::to_string(&trace.tool_calls).unwrap_or_default()
-                )),
-            ],
-            tools: Vec::new(),
-            tool_choice: None,
-            stream: false,
-        })
-        .await?;
+    let messages = vec![
+        ChatMessage::system(
+            "You judge a terminal agent eval. Return PASS or FAIL on the first line, then a concise reason.",
+        ),
+        ChatMessage::user(format!(
+            "Assertion:\n{prompt}\n\nUser prompt:\n{}\n\nFinal assistant:\n{}\n\nTool calls:\n{}",
+            trace.case.prompt,
+            trace.final_assistant,
+            serde_json::to_string(&trace.tool_calls).unwrap_or_default()
+        )),
+    ];
+    let estimated_input_tokens = estimate_messages_breakdown(&messages).total();
+    let request = ChatCompletionRequest {
+        model: String::new(),
+        messages,
+        tools: Vec::new(),
+        tool_choice: None,
+        stream: false,
+    };
+    let pending_trace = llm_trace.as_ref().map(|trace_recorder| {
+        trace_recorder.begin_call(
+            &client,
+            &request,
+            false,
+            TraceMetadata {
+                action_type: "eval_judge",
+                label: Some("eval-judge".to_string()),
+                estimated_input_tokens: Some(estimated_input_tokens),
+                ..TraceMetadata::default()
+            },
+        )
+    });
+    let response_result = client.complete_chat(request).await;
+    if let (Some(trace_recorder), Some(pending_trace)) = (llm_trace, pending_trace) {
+        let _ = trace_recorder.finish_call(pending_trace, &response_result);
+    }
+    let response = response_result?;
     let text = response
         .choices
         .first()
@@ -628,6 +676,8 @@ struct EvalAgentRunner {
     stats: TokenLedger,
     debug_enabled: bool,
     debug: Vec<String>,
+    llm_trace: Option<TraceRecorder>,
+    llm_trace_path: PathBuf,
 }
 
 impl EvalAgentRunner {
@@ -637,6 +687,7 @@ impl EvalAgentRunner {
         _models: ModelRegistry,
         model: ModelProfile,
         debug_enabled: bool,
+        trace_path: PathBuf,
     ) -> anyhow::Result<Self> {
         let skills = SkillRegistry::discover(&sources)?;
         let mcp = McpRegistry::load(&sources)?;
@@ -645,8 +696,9 @@ impl EvalAgentRunner {
             config.context.max_tokens,
             config.context.summary_aggressiveness,
         );
+        let client = OpenAiClient::new(model);
         Ok(Self {
-            client: OpenAiClient::new(model),
+            client,
             config,
             tools: ToolRegistry::core(),
             manifest,
@@ -656,11 +708,17 @@ impl EvalAgentRunner {
             stats: TokenLedger::default(),
             debug_enabled,
             debug: Vec::new(),
+            llm_trace: None,
+            llm_trace_path: trace_path,
         })
     }
 
     async fn run_case(&mut self, case: EvalCase) -> EvalTrace {
         let started = Instant::now();
+        if self.debug_enabled {
+            self.llm_trace =
+                TraceRecorder::eval_case(self.llm_trace_path.clone(), &case.id, &self.client).ok();
+        }
         let mut trace = EvalTrace {
             case: case.clone(),
             model: self.client.profile().clone(),
@@ -723,7 +781,18 @@ impl EvalAgentRunner {
 
         if let Some(summary_usage) = self
             .context
-            .refresh_summary(&self.client, initial_prompt.estimated_tokens.tokens)
+            .refresh_summary(
+                &self.client,
+                initial_prompt.estimated_tokens.tokens,
+                self.llm_trace.as_mut(),
+                TraceMetadata {
+                    action_type: "summary_refresh",
+                    label: Some("summary".to_string()),
+                    turn_index: Some(self.stats.turns.len()),
+                    context_limit: Some(self.config.context.max_tokens),
+                    ..TraceMetadata::default()
+                },
+            )
             .await?
         {
             let summary_total = summary_usage.input_tokens + summary_usage.output_tokens;
@@ -788,33 +857,53 @@ impl EvalAgentRunner {
             }
 
             let mut response_text = String::new();
-            let response = self
-                .client
-                .stream_chat(
-                    ChatCompletionRequest {
-                        model: String::new(),
-                        messages: messages.clone(),
-                        tools: tool_schemas.clone(),
-                        tool_choice: None,
-                        stream: true,
-                    },
-                    |event| match event {
-                        StreamEvent::TextDelta(delta) => {
-                            response_text.push_str(&delta);
-                            trace
-                                .events
-                                .push(EvalTraceEvent::AssistantDelta { round, text: delta });
-                        }
-                        StreamEvent::ToolCallDone(call) => {
-                            trace.events.push(EvalTraceEvent::ToolStarted {
-                                round,
-                                name: call.function.name,
-                            });
-                        }
-                        StreamEvent::Finished => {}
+            let request = ChatCompletionRequest {
+                model: String::new(),
+                messages: messages.clone(),
+                tools: tool_schemas.clone(),
+                tool_choice: None,
+                stream: true,
+            };
+            let pending_trace = self.llm_trace.as_ref().map(|llm_trace| {
+                llm_trace.begin_call(
+                    &self.client,
+                    &request,
+                    true,
+                    TraceMetadata {
+                        action_type: "agent_turn",
+                        label: Some(format!("agent-{round}")),
+                        turn_index: Some(self.stats.turns.len()),
+                        round_index: Some(round),
+                        estimated_input_tokens: Some(request_tokens),
+                        context_limit: Some(self.config.context.max_tokens),
+                        token_breakdown: Some(request_breakdown),
+                        ..TraceMetadata::default()
                     },
                 )
-                .await?;
+            });
+            let response_result = self
+                .client
+                .stream_chat(request, |event| match event {
+                    StreamEvent::TextDelta(delta) => {
+                        response_text.push_str(&delta);
+                        trace
+                            .events
+                            .push(EvalTraceEvent::AssistantDelta { round, text: delta });
+                    }
+                    StreamEvent::ToolCallDone(call) => {
+                        trace.events.push(EvalTraceEvent::ToolStarted {
+                            round,
+                            name: call.function.name,
+                        });
+                    }
+                    StreamEvent::Finished => {}
+                })
+                .await;
+            if let (Some(llm_trace), Some(pending_trace)) = (self.llm_trace.as_mut(), pending_trace)
+            {
+                let _ = llm_trace.finish_call(pending_trace, &response_result);
+            }
+            let response = response_result?;
             last_request_messages = messages.clone();
 
             let message = response
@@ -919,6 +1008,8 @@ impl EvalAgentRunner {
                         &incremental_batch,
                         &assistant_tool_message,
                         &mut usage,
+                        round,
+                        tool_index,
                     )
                     .await?;
                 let next_context = prepare_next_turn_context(
@@ -986,6 +1077,8 @@ impl EvalAgentRunner {
         consumed_tool_batch: &[ChatMessage],
         assistant_response: &ChatMessage,
         usage: &mut TurnUsage,
+        round: usize,
+        tool_index: usize,
     ) -> Result<TurnScratchpad, LlmError> {
         let source = turn_scratchpad_update_source(consumed_tool_batch, assistant_response);
         let messages = build_fitted_turn_scratchpad_update_messages(
@@ -1004,16 +1097,35 @@ impl EvalAgentRunner {
                 .unwrap_or_default(),
             scratchpad.summary.chars().count()
         ));
-        let response = self
-            .client
-            .complete_chat(ChatCompletionRequest {
-                model: String::new(),
-                messages,
-                tools: Vec::new(),
-                tool_choice: None,
-                stream: false,
-            })
-            .await?;
+        let request = ChatCompletionRequest {
+            model: String::new(),
+            messages,
+            tools: Vec::new(),
+            tool_choice: None,
+            stream: false,
+        };
+        let pending_trace = self.llm_trace.as_ref().map(|llm_trace| {
+            llm_trace.begin_call(
+                &self.client,
+                &request,
+                false,
+                TraceMetadata {
+                    action_type: "turn_scratchpad",
+                    label: Some("turn-scratchpad".to_string()),
+                    turn_index: Some(self.stats.turns.len()),
+                    round_index: Some(round),
+                    tool_index: Some(tool_index),
+                    estimated_input_tokens: Some(estimated_input_tokens),
+                    context_limit: Some(self.config.context.max_tokens),
+                    ..TraceMetadata::default()
+                },
+            )
+        });
+        let response_result = self.client.complete_chat(request).await;
+        if let (Some(llm_trace), Some(pending_trace)) = (self.llm_trace.as_mut(), pending_trace) {
+            let _ = llm_trace.finish_call(pending_trace, &response_result);
+        }
+        let response = response_result?;
         let summary = response
             .choices
             .first()
@@ -1162,6 +1274,7 @@ mod tests {
             &trace,
             &models,
             &trace.model,
+            None,
         )
         .await;
 
@@ -1185,6 +1298,7 @@ mod tests {
             &trace,
             &models,
             &trace.model,
+            None,
         )
         .await;
 

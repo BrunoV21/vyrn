@@ -1,8 +1,10 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::tempdir;
-use vyrn::tools::ToolRegistry;
+use vyrn::tools::{
+    ASK_USER_TOOL_NAME, AskUserAnswer, AskUserRequest, AskUserResponse, ToolRegistry,
+};
 
 #[tokio::test]
 async fn edit_file_requires_exactly_one_match() {
@@ -135,4 +137,77 @@ async fn read_image_attaches_base64_images() {
         result.images[0].base64_data,
         STANDARD.encode([137, 80, 78, 71])
     );
+}
+
+#[test]
+fn ask_user_is_exposed_as_core_tool_schema() {
+    let tools = ToolRegistry::core();
+    let schemas = tools.schemas();
+    let ask_user = schemas
+        .iter()
+        .find(|schema| schema["function"]["name"] == ASK_USER_TOOL_NAME)
+        .expect("ask_user schema should be exposed");
+
+    assert_eq!(
+        ask_user["function"]["description"],
+        "ask human clarification"
+    );
+    assert_eq!(
+        ask_user["function"]["parameters"]["required"],
+        json!(["questions"])
+    );
+}
+
+#[test]
+fn ask_user_request_validates_question_shape() {
+    let request = AskUserRequest::parse(json!({
+        "questions": [{
+            "id": "scope",
+            "header": "Scope",
+            "question": "Which path should I take?",
+            "options": [
+                { "label": "Core tool", "description": "Always available" },
+                { "label": "Slash command" }
+            ]
+        }]
+    }))
+    .unwrap();
+
+    assert_eq!(request.questions[0].id, "scope");
+    assert_eq!(request.questions[0].options.len(), 2);
+
+    let error = AskUserRequest::parse(json!({
+        "questions": [
+            { "id": "scope", "question": "One?" },
+            { "id": "scope", "question": "Two?" }
+        ]
+    }))
+    .unwrap_err();
+    assert!(error.to_string().contains("duplicate question id"));
+}
+
+#[test]
+fn ask_user_response_serializes_tool_payload() {
+    let result = AskUserResponse {
+        answers: vec![
+            AskUserAnswer::Option {
+                id: "scope".to_string(),
+                answer: "Core tool".to_string(),
+                option_index: 0,
+                option_label: "Core tool".to_string(),
+            },
+            AskUserAnswer::Freeform {
+                id: "notes".to_string(),
+                answer: "Use the smallest API.".to_string(),
+            },
+        ],
+    }
+    .into_tool_result()
+    .unwrap();
+
+    let value: Value = serde_json::from_str(&result.content).unwrap();
+    assert_eq!(value["answers"][0]["kind"], "option");
+    assert_eq!(value["answers"][0]["option_index"], 0);
+    assert_eq!(value["answers"][1]["kind"], "freeform");
+    assert_eq!(value["answers"][1]["answer"], "Use the smallest API.");
 }

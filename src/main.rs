@@ -11,5 +11,11 @@ async fn main() -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    if let Some(cli::Commands::DebugViewer) = args.command.clone() {
+        let sources = vyrn::config::ConfigSources::discover(std::env::current_dir()?)?;
+        let path = vyrn::debug_trace::write_viewer(&sources)?;
+        println!("{}", path.display());
+        return Ok(());
+    }
     app::App::build(args).await?.run().await
 }

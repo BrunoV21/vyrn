@@ -13,6 +13,8 @@ pub enum ToolError {
     InvalidInput { tool: String, message: String },
     #[error("tool '{tool}' failed: {message}")]
     Failed { tool: String, message: String },
+    #[error("tool canceled")]
+    Canceled,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -70,6 +72,7 @@ impl ToolRegistry {
         registry.insert(crate::tools::file::WriteFileTool);
         registry.insert(crate::tools::file::EditFileTool);
         registry.insert(crate::tools::batch::BatchTool);
+        registry.insert(crate::tools::user_input::AskUserTool);
         registry.insert(RefreshManifestTool);
         registry
     }

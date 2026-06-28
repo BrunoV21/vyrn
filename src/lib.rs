@@ -2,6 +2,7 @@ pub mod agent;
 pub mod app;
 pub mod cli;
 pub mod config;
+pub mod debug_trace;
 pub mod error;
 pub mod eval;
 pub mod llm;

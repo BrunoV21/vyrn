@@ -20,7 +20,9 @@ pub enum ConfigError {
         path: String,
         source: toml::de::Error,
     },
-    #[error("no model profiles found; create .vyrn/models.toml or ~/.vyrn/models.toml")]
+    #[error(
+        "no model profiles found; create ~/.vyrn/models.toml (recommended) or .vyrn/models.toml"
+    )]
     NoModelProfiles,
     #[error("model profile '{0}' was not found")]
     MissingModel(String),

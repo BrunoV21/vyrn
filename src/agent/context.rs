@@ -2,6 +2,7 @@ use crate::agent::prompt::build_summary_refresh_messages;
 use crate::agent::tokens::{estimate_messages_breakdown, estimate_text_tokens};
 use crate::agent::transcript::Exchange;
 use crate::config::SummaryAggressiveness;
+use crate::debug_trace::{TraceMetadata, TraceRecorder};
 use crate::llm::{ChatCompletionRequest, LlmError, OpenAiClient};
 
 #[derive(Debug, Clone)]
@@ -68,6 +69,8 @@ impl ContextManager {
         &mut self,
         client: &OpenAiClient,
         estimated_next_prompt_tokens: usize,
+        trace: Option<&mut TraceRecorder>,
+        mut trace_metadata: TraceMetadata,
     ) -> Result<Option<SummaryRefreshUsage>, LlmError> {
         let Some(exchange) = &self.previous_exchange else {
             return Ok(None);
@@ -83,15 +86,22 @@ impl ContextManager {
         );
         let input_breakdown = estimate_messages_breakdown(&messages);
         let input_tokens = input_breakdown.total();
-        let response = client
-            .complete_chat(ChatCompletionRequest {
-                model: String::new(),
-                messages,
-                tools: Vec::new(),
-                tool_choice: None,
-                stream: false,
-            })
-            .await?;
+        trace_metadata.estimated_input_tokens = Some(input_tokens);
+        let request = ChatCompletionRequest {
+            model: String::new(),
+            messages,
+            tools: Vec::new(),
+            tool_choice: None,
+            stream: false,
+        };
+        let pending = trace
+            .as_ref()
+            .map(|recorder| recorder.begin_call(client, &request, false, trace_metadata));
+        let response_result = client.complete_chat(request).await;
+        if let (Some(recorder), Some(pending)) = (trace, pending) {
+            let _ = recorder.finish_call(pending, &response_result);
+        }
+        let response = response_result?;
         let summary = response
             .choices
             .first()

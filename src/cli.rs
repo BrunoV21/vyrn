@@ -29,6 +29,8 @@ pub struct Cli {
 pub enum Commands {
     /// Run JSON-defined live agent evals.
     Eval(EvalArgs),
+    /// Write the local static debug trace viewer and print its path.
+    DebugViewer,
 }
 
 #[derive(Debug, Clone, Args)]

@@ -101,6 +101,15 @@ api_key = ""
     let debug_log = std::fs::read_to_string(output_dir.join("read-fixture/debug.log")).unwrap();
     assert!(debug_log.contains("eval_case_start"), "{debug_log}");
     assert!(debug_log.contains("agent_request round=0"), "{debug_log}");
+    let llm_trace: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(output_dir.join("read-fixture/llm-trace.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(llm_trace["run_kind"], "eval");
+    assert_eq!(llm_trace["eval_case_id"], "read-fixture");
+    assert_eq!(llm_trace["calls"][0]["action_type"], "agent_turn");
+    assert_eq!(llm_trace["calls"][0]["request"]["model"], "fake-small");
+    assert_eq!(llm_trace["calls"][0]["request"]["stream"], true);
 }
 
 #[test]

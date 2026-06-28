@@ -2,6 +2,7 @@ use crate::agent::context::ContextManager;
 use crate::agent::tokens::TokenLedger;
 use crate::cli::Cli;
 use crate::config::{ConfigSources, EffectiveConfig, ModelProfile, ModelRegistry, ModelState};
+use crate::debug_trace::TraceRecorder;
 use crate::llm::OpenAiClient;
 use crate::mcp::McpRegistry;
 use crate::skills::SkillRegistry;
@@ -22,6 +23,7 @@ pub struct App {
     pub stats: TokenLedger,
     pub verbose: bool,
     pub debug: bool,
+    pub trace: Option<TraceRecorder>,
 }
 
 impl App {
@@ -55,8 +57,15 @@ impl App {
             config.context.summary_aggressiveness,
         );
 
+        let client = OpenAiClient::new(model.clone());
+        let trace = if args.debug {
+            Some(TraceRecorder::interactive(&sources, &client)?)
+        } else {
+            None
+        };
+
         Ok(Self {
-            client: OpenAiClient::new(model.clone()),
+            client,
             model,
             models,
             sources,
@@ -69,6 +78,7 @@ impl App {
             stats: TokenLedger::default(),
             verbose: args.verbose,
             debug: args.debug,
+            trace,
         })
     }
 
