@@ -67,3 +67,7 @@ Core palette:
 - No decorative product metaphors. The interface should feel like a serious terminal tool.
 
 See [`style-guide.md`](./style-guide.md) for concrete token usage across docs, assets, and the CLI.
+
+See [`terminal-agent-market-gap.md`](./terminal-agent-market-gap.md) for the
+market research behind vyrn's small-context positioning and the product
+requirements that follow from it.
