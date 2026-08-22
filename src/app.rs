@@ -1,7 +1,9 @@
 use crate::agent::context::ContextManager;
 use crate::agent::tokens::TokenLedger;
 use crate::cli::Cli;
-use crate::config::{ConfigSources, EffectiveConfig, ModelProfile, ModelRegistry, ModelState};
+use crate::config::{
+    ConfigError, ConfigSources, EffectiveConfig, ModelProfile, ModelRegistry, ModelState,
+};
 use crate::debug_trace::TraceRecorder;
 use crate::llm::OpenAiClient;
 use crate::mcp::McpRegistry;
@@ -23,6 +25,7 @@ pub struct App {
     pub stats: TokenLedger,
     pub verbose: bool,
     pub debug: bool,
+    pub prompt: Option<String>,
     pub trace: Option<TraceRecorder>,
 }
 
@@ -35,10 +38,14 @@ impl App {
             config.context.max_tokens = max_tokens;
         }
 
-        let models = crate::config::load_model_profiles(&sources)?;
+        let mut models = match crate::config::load_model_profiles(&sources) {
+            Ok(models) => models,
+            Err(ConfigError::NoModelProfiles) => ModelRegistry::default(),
+            Err(error) => return Err(error.into()),
+        };
         let model_state = ModelState::load(&sources);
-        let model = if args.models {
-            let model = crate::tui::select_model(&models).await?;
+        let model = if models.is_empty() || args.models {
+            let model = crate::tui::select_model(&sources, &mut models).await?;
             let _ = ModelState::save_last_selected(&sources, &model.name);
             model
         } else {
@@ -59,7 +66,11 @@ impl App {
 
         let client = OpenAiClient::new(model.clone());
         let trace = if args.debug {
-            Some(TraceRecorder::interactive(&sources, &client)?)
+            Some(if args.prompt.is_some() {
+                TraceRecorder::programmatic(&sources, &client)?
+            } else {
+                TraceRecorder::interactive(&sources, &client)?
+            })
         } else {
             None
         };
@@ -78,6 +89,7 @@ impl App {
             stats: TokenLedger::default(),
             verbose: args.verbose,
             debug: args.debug,
+            prompt: args.prompt,
             trace,
         })
     }

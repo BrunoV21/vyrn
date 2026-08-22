@@ -17,13 +17,13 @@ pub struct ModelRegistry {
     profiles: BTreeMap<String, ModelProfile>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct ModelsFile {
     #[serde(default)]
     models: BTreeMap<String, ModelProfileFile>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ModelProfileFile {
     base_url: String,
     model: String,
@@ -42,6 +42,10 @@ impl ModelRegistry {
 
     pub fn get(&self, name: &str) -> Option<ModelProfile> {
         self.profiles.get(name).cloned()
+    }
+
+    pub fn insert(&mut self, profile: ModelProfile) {
+        self.profiles.insert(profile.name.clone(), profile);
     }
 
     pub fn first(&self) -> Option<ModelProfile> {
@@ -104,6 +108,48 @@ impl ModelRegistry {
 
         Ok(())
     }
+}
+
+pub fn save_global_model_profile(
+    sources: &ConfigSources,
+    profile: &ModelProfile,
+) -> Result<(), ConfigError> {
+    let mut parsed = if sources.global_models.exists() {
+        let raw = std::fs::read_to_string(&sources.global_models).map_err(|source| {
+            ConfigError::Read {
+                path: sources.global_models.display().to_string(),
+                source,
+            }
+        })?;
+        toml::from_str(&raw).map_err(|source| ConfigError::ParseToml {
+            path: sources.global_models.display().to_string(),
+            source,
+        })?
+    } else {
+        ModelsFile::default()
+    };
+
+    parsed.models.insert(
+        profile.name.clone(),
+        ModelProfileFile {
+            base_url: profile.base_url.clone(),
+            model: profile.model.clone(),
+            api_key: profile.api_key.clone(),
+        },
+    );
+
+    if let Some(parent) = sources.global_models.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            path: parent.display().to_string(),
+            source,
+        })?;
+    }
+
+    let raw = toml::to_string_pretty(&parsed).unwrap_or_default();
+    std::fs::write(&sources.global_models, raw).map_err(|source| ConfigError::Write {
+        path: sources.global_models.display().to_string(),
+        source,
+    })
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

@@ -8,6 +8,54 @@ use vyrn::agent::tokens::estimate_chat_request_breakdown;
 use vyrn::llm::ChatMessage;
 
 #[test]
+fn visibility_commands_work_before_the_first_turn() {
+    let temp = tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".vyrn")).unwrap();
+    std::fs::write(
+        temp.path().join(".vyrn/models.toml"),
+        r#"[models.local]
+base_url = "http://127.0.0.1:9/v1"
+model = "offline"
+api_key = ""
+"#,
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("--debug")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/help\n/context\n/scratchpad\n/debug\n/exit\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("/scratchpad  show the last evolving turn scratchpad"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("context (estimated): 0/4096"), "{stdout}");
+    assert!(stdout.contains("available: 4096"), "{stdout}");
+    assert!(stdout.contains("turn scratchpad: none"), "{stdout}");
+    assert!(stdout.contains("debug trace:"), "{stdout}");
+    assert!(stdout.contains(".vyrn/debug/sessions/"), "{stdout}");
+}
+
+#[test]
 fn repl_runs_against_openai_compatible_streaming_server() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -53,6 +101,7 @@ api_key = ""
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .current_dir(temp.path())
+        .env("HOME", temp.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -61,7 +110,9 @@ api_key = ""
 
     {
         let stdin = child.stdin.as_mut().unwrap();
-        stdin.write_all(b"read fixture.txt\n/exit\n").unwrap();
+        stdin
+            .write_all(b"read fixture.txt\n/scratchpad\n/exit\n")
+            .unwrap();
     }
 
     let output = child.wait_with_output().unwrap();
@@ -76,7 +127,95 @@ api_key = ""
     assert!(stdout.contains("> using llama3 @"));
     assert!(stdout.contains("[read_file ok]"));
     assert!(stdout.contains("I read fixture.txt: hello from e2e."));
+    assert!(stdout.contains("turn scratchpad ("), "{stdout}");
+    assert!(stdout.contains("read_file saw fixture.txt"), "{stdout}");
     assert!(stdout.contains("turn spent:"));
+}
+
+#[test]
+fn parallel_tool_calls_share_one_bounded_scratchpad_update() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let server_bodies = Arc::clone(&bodies);
+    let server = thread::spawn(move || {
+        for index in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let body = read_http_body(&mut stream);
+            server_bodies.lock().unwrap().push(body);
+            match index {
+                0 => write_sse(
+                    &mut stream,
+                    r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}},{"index":1,"id":"call_b","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"b.txt\"}"}}]}}]}"#,
+                ),
+                1 => write_json(
+                    &mut stream,
+                    r#"{"choices":[{"message":{"role":"assistant","content":"- Read a.txt and b.txt in one parallel batch."}}],"usage":{"prompt_tokens":70,"completion_tokens":12,"total_tokens":82}}"#,
+                ),
+                _ => write_sse(
+                    &mut stream,
+                    r#"data: {"choices":[{"delta":{"content":"Both files were read."}}]}"#,
+                ),
+            }
+        }
+    });
+
+    let temp = tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".vyrn")).unwrap();
+    std::fs::write(temp.path().join("a.txt"), "alpha").unwrap();
+    std::fs::write(temp.path().join("b.txt"), "beta").unwrap();
+    std::fs::write(
+        temp.path().join(".vyrn/models.toml"),
+        format!(
+            r#"[models.local]
+base_url = "http://{addr}/v1"
+model = "fake-small"
+api_key = ""
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"read both files\n/exit\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    server.join().unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = bodies.lock().unwrap();
+    assert_eq!(requests.len(), 3, "{requests:#?}");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.contains("Current scratchpad"))
+            .count(),
+        1,
+        "{requests:#?}"
+    );
+    assert!(requests[1].contains("alpha"), "{}", requests[1]);
+    assert!(requests[1].contains("beta"), "{}", requests[1]);
+    assert!(
+        requests[1].contains(r#""max_tokens":384"#),
+        "{}",
+        requests[1]
+    );
+    assert_eq!(requests[2].matches(r#""role":"tool""#).count(), 2);
 }
 
 #[test]
@@ -123,6 +262,7 @@ api_key = ""
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .current_dir(temp.path())
+        .env("HOME", temp.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -218,6 +358,7 @@ api_key = ""
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .current_dir(temp.path())
+        .env("HOME", temp.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -281,6 +422,7 @@ api_key = ""
     let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .arg("--debug")
         .current_dir(temp.path())
+        .env("HOME", temp.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -323,6 +465,83 @@ api_key = ""
         trace["calls"][0]["response"]["choices"][0]["message"]["content"],
         "Logged."
     );
+}
+
+#[test]
+fn prompt_mode_runs_once_and_records_provider_and_estimated_tokens() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let body = Arc::new(Mutex::new(String::new()));
+    let server_body = Arc::clone(&body);
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        *server_body.lock().unwrap() = read_http_body(&mut stream);
+        write_sse(
+            &mut stream,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"One shot complete.\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":41,\"completion_tokens\":5,\"total_tokens\":46}}",
+        );
+    });
+
+    let temp = tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".vyrn")).unwrap();
+    std::fs::write(
+        temp.path().join(".vyrn/models.toml"),
+        format!(
+            r#"[models.llama3]
+base_url = "http://{addr}/v1"
+model = "fake-small"
+api_key = ""
+"#
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("-p")
+        .arg("say one shot")
+        .arg("--debug")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    server.join().unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("One shot complete."), "{stdout}");
+    assert!(!stdout.contains("> using"), "{stdout}");
+    assert!(!stdout.contains("you:"), "{stdout}");
+
+    let request = body.lock().unwrap();
+    assert!(request.contains(r#""include_usage":true"#), "{request}");
+
+    let trace_path = std::fs::read_dir(temp.path().join(".vyrn/debug/sessions"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .unwrap();
+    let trace: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(trace_path).unwrap()).unwrap();
+    let call = &trace["calls"][0];
+    assert_eq!(trace["schema_version"], 2);
+    assert_eq!(trace["run_kind"], "prompt");
+    assert_eq!(trace["end_reason"], "prompt_complete");
+    assert_eq!(call["action_scope"], "interaction");
+    assert_eq!(call["token_accounting"]["provider"]["total_tokens"], 46);
+    assert_eq!(
+        call["token_accounting"]["effective"]["prompt_source"],
+        "provider"
+    );
+    assert_eq!(
+        call["token_accounting"]["effective"]["completion_source"],
+        "provider"
+    );
+    assert!(call["message_token_estimates"].as_array().unwrap().len() >= 2);
 }
 
 #[test]
@@ -382,6 +601,7 @@ api_key = ""
         .arg("--context")
         .arg("1200")
         .current_dir(temp.path())
+        .env("HOME", temp.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -472,6 +692,7 @@ api_key = ""
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .current_dir(temp.path())
+        .env("HOME", temp.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -550,6 +771,7 @@ api_key = ""
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .current_dir(temp.path())
+        .env("HOME", temp.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

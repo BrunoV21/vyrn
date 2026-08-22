@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use tempfile::tempdir;
 use vyrn::config::{
-    ConfigSources, EffectiveConfig, ModelState, SummaryAggressiveness, load_model_profiles,
+    ConfigSources, EffectiveConfig, ModelProfile, ModelState, SummaryAggressiveness,
+    load_model_profiles, save_global_model_profile,
 };
 
 #[test]
@@ -118,6 +119,41 @@ model = "beta-model"
         ModelState::load(&sources).last_selected_model.as_deref(),
         Some("beta")
     );
+}
+
+#[test]
+fn save_global_model_profile_creates_and_updates_models_file() {
+    let temp = tempdir().unwrap();
+    let project = temp.path().join("project");
+    let global = temp.path().join("home/.vyrn");
+    let sources = sources(project, global);
+
+    save_global_model_profile(
+        &sources,
+        &ModelProfile {
+            name: "local".to_string(),
+            base_url: "http://localhost:11434/v1".to_string(),
+            model: "llama3.2".to_string(),
+            api_key: String::new(),
+        },
+    )
+    .unwrap();
+    save_global_model_profile(
+        &sources,
+        &ModelProfile {
+            name: "local".to_string(),
+            base_url: "http://localhost:1234/v1".to_string(),
+            model: "qwen2.5".to_string(),
+            api_key: "secret".to_string(),
+        },
+    )
+    .unwrap();
+
+    let models = load_model_profiles(&sources).unwrap();
+    let local = models.get("local").unwrap();
+    assert_eq!(local.base_url, "http://localhost:1234/v1");
+    assert_eq!(local.model, "qwen2.5");
+    assert_eq!(local.api_key, "secret");
 }
 
 fn sources(project_root: PathBuf, global_vyrn: PathBuf) -> ConfigSources {

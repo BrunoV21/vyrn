@@ -5,6 +5,7 @@ pub mod config;
 pub mod debug_trace;
 pub mod error;
 pub mod eval;
+pub mod init;
 pub mod llm;
 pub mod mcp;
 pub mod skills;

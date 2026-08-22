@@ -11,6 +11,8 @@ pub struct TokenEstimate {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TokenLedger {
     pub session_sent: usize,
+    pub session_provider_tokens: usize,
+    pub session_estimated_tokens: usize,
     pub session_would_be: usize,
     pub session_saved: isize,
     pub turns: Vec<TurnUsage>,
@@ -19,6 +21,8 @@ pub struct TokenLedger {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TurnUsage {
     pub sent: usize,
+    pub provider_tokens: usize,
+    pub estimated_tokens: usize,
     pub would_be: usize,
     pub saved: isize,
     pub context_tokens: usize,
@@ -30,8 +34,53 @@ pub struct TurnUsage {
 pub struct CallUsage {
     pub label: String,
     pub sent: usize,
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub input_source: TokenSource,
+    pub output_source: TokenSource,
+    pub provider_tokens: usize,
+    pub estimated_tokens: usize,
     pub would_be: usize,
     pub breakdown: TokenBreakdown,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenSource {
+    Provider,
+    #[default]
+    Estimate,
+}
+
+impl TokenSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Provider => "provider",
+            Self::Estimate => "estimate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenCount {
+    pub tokens: usize,
+    pub source: TokenSource,
+}
+
+impl TokenCount {
+    pub fn provider(tokens: usize) -> Self {
+        Self {
+            tokens,
+            source: TokenSource::Provider,
+        }
+    }
+
+    pub fn estimate(tokens: usize) -> Self {
+        Self {
+            tokens,
+            source: TokenSource::Estimate,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -62,6 +111,8 @@ impl TokenLedger {
     pub fn push_turn(&mut self, mut usage: TurnUsage) {
         usage.saved = usage.would_be as isize - usage.sent as isize;
         self.session_sent += usage.sent;
+        self.session_provider_tokens += usage.provider_tokens;
+        self.session_estimated_tokens += usage.estimated_tokens;
         self.session_would_be += usage.would_be;
         self.session_saved += usage.saved;
         self.turns.push(usage);
@@ -80,13 +131,45 @@ impl TurnUsage {
         would_be: usize,
         breakdown: TokenBreakdown,
     ) {
+        self.add_model_call_with_breakdown(
+            label,
+            TokenCount::estimate(sent),
+            TokenCount::estimate(0),
+            would_be,
+            breakdown,
+        );
+    }
+
+    pub fn add_model_call_with_breakdown(
+        &mut self,
+        label: impl Into<String>,
+        input: TokenCount,
+        output: TokenCount,
+        would_be: usize,
+        breakdown: TokenBreakdown,
+    ) {
+        let sent = input.tokens + output.tokens;
         let breakdown = breakdown.scaled_to_total(sent);
+        let provider_tokens = [input, output]
+            .into_iter()
+            .filter(|count| count.source == TokenSource::Provider)
+            .map(|count| count.tokens)
+            .sum();
+        let estimated_tokens = sent.saturating_sub(provider_tokens);
         self.sent += sent;
+        self.provider_tokens += provider_tokens;
+        self.estimated_tokens += estimated_tokens;
         self.would_be += would_be;
         self.breakdown.add(breakdown);
         self.calls.push(CallUsage {
             label: label.into(),
             sent,
+            input_tokens: input.tokens,
+            output_tokens: output.tokens,
+            input_source: input.source,
+            output_source: output.source,
+            provider_tokens,
+            estimated_tokens,
             would_be,
             breakdown,
         });

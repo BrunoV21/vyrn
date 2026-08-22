@@ -1,7 +1,8 @@
 use crate::config::ModelProfile;
 use crate::llm::stream::StreamEvent;
 use crate::llm::types::{
-    ChatCompletionRequest, ChatCompletionResponse, ChatMessage, ToolCall, ToolCallFunction, Usage,
+    ChatCompletionRequest, ChatCompletionResponse, ChatMessage, StreamOptions, ToolCall,
+    ToolCallFunction, Usage,
 };
 use futures_util::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -92,6 +93,9 @@ impl OpenAiClient {
     {
         request.model = self.profile.model.clone();
         request.stream = true;
+        request.stream_options.get_or_insert(StreamOptions {
+            include_usage: true,
+        });
         let url = self.chat_completions_url();
         let response = self
             .client
@@ -149,9 +153,7 @@ impl OpenAiClient {
                         on_event(StreamEvent::TextDelta(delta_content));
                     }
                     for delta_call in choice.delta.tool_calls {
-                        let accumulator = tool_calls
-                            .entry(delta_call.index)
-                            .or_insert_with(ToolCallAccumulator::default);
+                        let accumulator = tool_calls.entry(delta_call.index).or_default();
                         if let Some(id) = delta_call.id {
                             accumulator.id = id;
                         }

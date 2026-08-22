@@ -1,6 +1,6 @@
 use crate::agent::prompt::build_agent_prompt;
 use crate::agent::tokens::{
-    TokenBreakdown, TokenLedger, TurnUsage, estimate_assistant_output_tokens,
+    TokenBreakdown, TokenCount, TokenLedger, TurnUsage, estimate_assistant_output_tokens,
     estimate_chat_request_breakdown, estimate_messages_breakdown, estimate_unpruned_request_tokens,
 };
 use crate::agent::transcript::{Exchange, truncate};
@@ -9,10 +9,11 @@ use crate::agent::turn::{
     prepare_next_turn_context, turn_scratchpad_update_source,
 };
 use crate::app::App;
-use crate::config::{ModelProfile, ModelRegistry, ModelState};
+use crate::config::{ConfigSources, ModelProfile, ModelRegistry, ModelState};
 use crate::debug_trace::{TraceMetadata, TraceRecorder};
 use crate::llm::{
-    ChatCompletionRequest, ChatMessage, ImageAttachment, LlmError, StreamEvent, ToolCall,
+    ChatCompletionRequest, ChatMessage, ImageAttachment, LlmError, StreamEvent, StreamOptions,
+    ToolCall,
 };
 use crate::tools::{
     ASK_USER_TOOL_NAME, AskUserAnswer, AskUserRequest, AskUserResponse, MachineManifest, ToolResult,
@@ -38,15 +39,61 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 
-const SLASH_COMMANDS: &[&str] = &[
-    "/models",
-    "/model",
-    "/stats",
-    "/manifest",
-    "/refresh",
-    "/skills",
-    "/clear",
-    "/exit",
+#[derive(Debug, Clone, Copy)]
+struct SlashCommand {
+    name: &'static str,
+    description: &'static str,
+}
+
+const SLASH_COMMANDS: &[SlashCommand] = &[
+    SlashCommand {
+        name: "/help",
+        description: "list commands and keyboard controls",
+    },
+    SlashCommand {
+        name: "/stats",
+        description: "provider usage, estimates, and savings",
+    },
+    SlashCommand {
+        name: "/context",
+        description: "context used, available, and retained",
+    },
+    SlashCommand {
+        name: "/scratchpad",
+        description: "show the last evolving turn scratchpad",
+    },
+    SlashCommand {
+        name: "/models",
+        description: "switch model profile (/model alias)",
+    },
+    SlashCommand {
+        name: "/model",
+        description: "alias for /models",
+    },
+    SlashCommand {
+        name: "/manifest",
+        description: "show the compact machine manifest",
+    },
+    SlashCommand {
+        name: "/refresh",
+        description: "rescan the machine manifest",
+    },
+    SlashCommand {
+        name: "/skills",
+        description: "list discovered skill sources",
+    },
+    SlashCommand {
+        name: "/debug",
+        description: "show debug trace status and path",
+    },
+    SlashCommand {
+        name: "/clear",
+        description: "reset context, scratchpad, and token stats",
+    },
+    SlashCommand {
+        name: "/exit",
+        description: "exit vyrn",
+    },
 ];
 const MAX_TOOL_ROUNDS: usize = 64;
 const MAX_PROMPT_HISTORY: usize = 100;
@@ -102,6 +149,7 @@ const SYSTEM_SURFACE: Color = VY_SURFACE;
 
 pub struct Repl {
     app: App,
+    last_scratchpad: TurnScratchpad,
     prompt_history: Vec<String>,
     plain_lines: Option<Lines<BufReader<tokio::io::Stdin>>>,
     input_pause: Arc<AtomicBool>,
@@ -118,6 +166,7 @@ impl Repl {
         let prompt_history = load_prompt_history(&app.sources);
         Self {
             app,
+            last_scratchpad: TurnScratchpad::default(),
             prompt_history,
             plain_lines: None,
             input_pause: Arc::new(AtomicBool::new(false)),
@@ -125,6 +174,7 @@ impl Repl {
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
+        let is_programmatic = self.app.prompt.is_some();
         self.debug_log(format!(
             "session_start model={} base_url={} context={} verbose={}",
             self.app.model.name,
@@ -132,15 +182,39 @@ impl Repl {
             self.app.config.context.max_tokens,
             self.app.verbose
         ));
-        let result = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        let result = if let Some(prompt) = self.app.prompt.take() {
+            self.run_programmatic(prompt).await
+        } else if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
             self.run_inline_tui().await
         } else {
             self.run_plain().await
         };
         if let Some(trace) = self.app.trace.as_mut() {
-            let _ = trace.finish("exit");
+            let reason = if is_programmatic {
+                if result.is_ok() {
+                    "prompt_complete"
+                } else {
+                    "prompt_error"
+                }
+            } else {
+                "exit"
+            };
+            let _ = trace.finish(reason);
         }
         result
+    }
+
+    async fn run_programmatic(&mut self, prompt: String) -> anyhow::Result<()> {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            anyhow::bail!("--prompt requires non-empty text");
+        }
+        self.handle_user_turn(UserTurnInput {
+            text: prompt.to_string(),
+            images: Vec::new(),
+        })
+        .await?;
+        Ok(())
     }
 
     async fn run_plain(&mut self) -> anyhow::Result<()> {
@@ -327,8 +401,20 @@ impl Repl {
     async fn handle_plain_slash_command(&mut self, input: &str) -> anyhow::Result<bool> {
         match input {
             "/exit" => Ok(true),
+            "/help" => {
+                println!("{}", help_text());
+                Ok(false)
+            }
             "/stats" => {
                 println!("{}", self.full_stats_text());
+                Ok(false)
+            }
+            "/context" => {
+                println!("{}", self.context_text());
+                Ok(false)
+            }
+            "/scratchpad" => {
+                println!("{}", self.scratchpad_text());
                 Ok(false)
             }
             "/manifest" => {
@@ -344,15 +430,20 @@ impl Repl {
                 println!("{}", self.skills_text());
                 Ok(false)
             }
+            "/debug" => {
+                println!("{}", self.debug_status_text());
+                Ok(false)
+            }
             "/clear" => {
                 self.app.context.clear();
                 self.app.stats = Default::default();
+                self.last_scratchpad = TurnScratchpad::default();
                 self.rotate_debug_trace("clear");
                 println!("cleared session context");
                 Ok(false)
             }
             "/models" | "/model" => {
-                let model = select_model(&self.app.models).await?;
+                let model = select_model(&self.app.sources, &mut self.app.models).await?;
                 self.switch_model(model, true);
                 Ok(false)
             }
@@ -377,6 +468,10 @@ impl Repl {
     ) -> anyhow::Result<bool> {
         match input {
             "/exit" => Ok(true),
+            "/help" => {
+                print_system_block(&help_text())?;
+                Ok(false)
+            }
             "/stats" => {
                 print_stats_panel(
                     &self.app.stats,
@@ -384,6 +479,14 @@ impl Repl {
                     self.app.config.context.max_tokens,
                     self.app.verbose,
                 )?;
+                Ok(false)
+            }
+            "/context" => {
+                print_system_block(&self.context_text())?;
+                Ok(false)
+            }
+            "/scratchpad" => {
+                print_system_block(&self.scratchpad_text())?;
                 Ok(false)
             }
             "/manifest" => {
@@ -399,9 +502,14 @@ impl Repl {
                 print_system_block(&self.skills_text())?;
                 Ok(false)
             }
+            "/debug" => {
+                print_system_block(&self.debug_status_text())?;
+                Ok(false)
+            }
             "/clear" => {
                 self.app.context.clear();
                 self.app.stats = Default::default();
+                self.last_scratchpad = TurnScratchpad::default();
                 self.rotate_debug_trace("clear");
                 *composer_status = self.composer_status_line();
                 clear_screen()?;
@@ -409,7 +517,7 @@ impl Repl {
                 Ok(false)
             }
             "/models" | "/model" => {
-                if let Some(model) = select_model_inline(&self.app.models)? {
+                if let Some(model) = select_model_inline(&self.app.sources, &mut self.app.models)? {
                     self.switch_model(model, true);
                     *composer_status = self.composer_status_line();
                     print_welcome(&self.app)?;
@@ -512,9 +620,16 @@ impl Repl {
                 summary_total,
                 initial_prompt.estimated_tokens.tokens
             ));
-            usage.add_call_with_breakdown(
+            usage.add_model_call_with_breakdown(
                 "summary",
-                summary_total,
+                TokenCount {
+                    tokens: summary_usage.input_tokens,
+                    source: summary_usage.input_source,
+                },
+                TokenCount {
+                    tokens: summary_usage.output_tokens,
+                    source: summary_usage.output_source,
+                },
                 summary_total,
                 TokenBreakdown {
                     summary_inputs: summary_usage.input_tokens,
@@ -535,6 +650,7 @@ impl Repl {
         usage.context_tokens = prompt.estimated_tokens.tokens;
         let base_messages = prompt.messages;
         let mut scratchpad = TurnScratchpad::default();
+        self.last_scratchpad = scratchpad.clone();
         let mut current_tool_batch = Vec::new();
         let mut last_request_messages =
             build_turn_messages(&base_messages, &scratchpad, &current_tool_batch);
@@ -581,6 +697,10 @@ impl Repl {
                 tools: tool_schemas.clone(),
                 tool_choice: None,
                 stream: true,
+                stream_options: Some(StreamOptions {
+                    include_usage: true,
+                }),
+                max_tokens: None,
             };
             let pending_trace = self.app.trace.as_ref().map(|trace| {
                 trace.begin_call(
@@ -622,17 +742,31 @@ impl Repl {
                 .first()
                 .map(|choice| choice.message.clone())
                 .ok_or(LlmError::MissingChoice)?;
-            let output_tokens = response
-                .usage
+            let provider_usage = response.usage;
+            let input = provider_usage
+                .map(|usage| usage.prompt_tokens)
+                .filter(|tokens| *tokens > 0)
+                .map(TokenCount::provider)
+                .unwrap_or_else(|| TokenCount::estimate(request_tokens));
+            let output = provider_usage
                 .map(|usage| usage.completion_tokens)
                 .filter(|tokens| *tokens > 0)
-                .unwrap_or_else(|| estimate_assistant_output_tokens(&message));
+                .map(TokenCount::provider)
+                .unwrap_or_else(|| {
+                    TokenCount::estimate(estimate_assistant_output_tokens(&message))
+                });
+            let output_tokens = output.tokens;
             let mut call_breakdown = request_breakdown;
             call_breakdown.assistant_outputs += output_tokens;
-            usage.add_call_with_breakdown(
+            let would_be = input
+                .tokens
+                .saturating_add(request_would_be.saturating_sub(request_tokens))
+                .saturating_add(output.tokens);
+            usage.add_model_call_with_breakdown(
                 format!("agent-{round}"),
-                request_tokens + output_tokens,
-                request_would_be + output_tokens,
+                input,
+                output,
+                would_be,
                 call_breakdown,
             );
 
@@ -657,8 +791,9 @@ impl Repl {
             }
 
             let assistant_tool_message = message;
+            let tool_count = tool_calls.len();
             current_tool_batch = vec![assistant_tool_message.clone()];
-            for (tool_index, call) in tool_calls.into_iter().enumerate() {
+            for call in tool_calls {
                 if call.function.name == ASK_USER_TOOL_NAME {
                     emit(TuiUpdate::ToolInputStart);
                 }
@@ -666,7 +801,6 @@ impl Repl {
                 if matches!(result, Err(crate::tools::ToolError::Canceled)) {
                     return Err(LlmError::Canceled);
                 }
-                let mut incremental_batch = vec![assistant_tool_message.clone()];
                 match &result {
                     Ok(tool_result) => {
                         emit(TuiUpdate::ToolOk {
@@ -677,7 +811,6 @@ impl Repl {
                             call.id.clone(),
                             truncate(&tool_result.content, 8000),
                         );
-                        incremental_batch.push(tool_message.clone());
                         current_tool_batch.push(tool_message);
                         all_tool_results.push(tool_result.clone());
                         let mut tool_images = tool_result.images.clone();
@@ -693,7 +826,6 @@ impl Repl {
                                 format!("Attached image(s) from read_image: {sources}"),
                                 &tool_images,
                             );
-                            incremental_batch.push(image_message.clone());
                             current_tool_batch.push(image_message);
                         }
                     }
@@ -704,51 +836,52 @@ impl Repl {
                             error: error.to_string(),
                         });
                         let tool_message = ChatMessage::tool(call.id.clone(), content);
-                        incremental_batch.push(tool_message.clone());
                         current_tool_batch.push(tool_message);
                     }
                 }
                 all_tool_calls.push(call);
-                scratchpad = self
-                    .update_turn_scratchpad(
-                        &scratchpad,
-                        &incremental_batch,
-                        &assistant_tool_message,
-                        &mut usage,
-                        self.app.config.context.max_tokens,
-                        round,
-                        tool_index,
-                    )
-                    .await?;
-                self.debug_log(format!(
-                    "turn_scratchpad_update round={} tool_index={} tokens={} chars={}",
-                    round,
-                    tool_index,
-                    crate::agent::tokens::estimate_text_tokens(&scratchpad.summary),
-                    scratchpad.summary.chars().count()
-                ));
-                let next_context = prepare_next_turn_context(
-                    &base_messages,
+            }
+            let last_tool_index = tool_count.saturating_sub(1);
+            scratchpad = self
+                .update_turn_scratchpad(
                     &scratchpad,
                     &current_tool_batch,
-                    &tool_schemas,
-                    self.app.config.context.max_tokens,
-                )?;
-                scratchpad = next_context.scratchpad;
-                current_tool_batch = next_context.tool_batch;
-                let preparation = next_context.preparation;
-                self.debug_log(format!(
-                    "tool_chain_prepare round={} tool_index={} before_tokens={} after_tokens={} threshold={} max_context={} scratchpad_tokens={} current_batch_messages={}",
+                    &assistant_tool_message,
+                    &mut usage,
                     round,
-                    tool_index,
-                    preparation.before_tokens,
-                    preparation.after_tokens,
-                    preparation.threshold,
-                    preparation.max_tokens,
-                    crate::agent::tokens::estimate_text_tokens(&scratchpad.summary),
-                    current_tool_batch.len()
-                ));
-            }
+                    last_tool_index,
+                )
+                .await?;
+            self.last_scratchpad = scratchpad.clone();
+            self.debug_log(format!(
+                "turn_scratchpad_update round={} tools={} tokens={} chars={}",
+                round,
+                tool_count,
+                crate::agent::tokens::estimate_text_tokens(&scratchpad.summary),
+                scratchpad.summary.chars().count()
+            ));
+            let next_context = prepare_next_turn_context(
+                &base_messages,
+                &scratchpad,
+                &current_tool_batch,
+                &tool_schemas,
+                self.app.config.context.max_tokens,
+            )?;
+            scratchpad = next_context.scratchpad;
+            self.last_scratchpad = scratchpad.clone();
+            current_tool_batch = next_context.tool_batch;
+            let preparation = next_context.preparation;
+            self.debug_log(format!(
+                "tool_chain_prepare round={} tools={} before_tokens={} after_tokens={} threshold={} max_context={} scratchpad_tokens={} current_batch_messages={}",
+                round,
+                tool_count,
+                preparation.before_tokens,
+                preparation.after_tokens,
+                preparation.threshold,
+                preparation.max_tokens,
+                crate::agent::tokens::estimate_text_tokens(&scratchpad.summary),
+                current_tool_batch.len()
+            ));
             if round + 1 == MAX_TOOL_ROUNDS {
                 hit_tool_round_limit = true;
             }
@@ -797,10 +930,10 @@ impl Repl {
         consumed_tool_batch: &[ChatMessage],
         assistant_response: &ChatMessage,
         usage: &mut TurnUsage,
-        max_tokens: usize,
         round: usize,
         tool_index: usize,
     ) -> Result<TurnScratchpad, LlmError> {
+        let max_tokens = self.app.config.context.max_tokens;
         let source = turn_scratchpad_update_source(consumed_tool_batch, assistant_response);
         let messages =
             build_fitted_turn_scratchpad_update_messages(&scratchpad.summary, &source, max_tokens);
@@ -821,6 +954,8 @@ impl Repl {
             tools: Vec::new(),
             tool_choice: None,
             stream: false,
+            stream_options: None,
+            max_tokens: Some(384),
         };
         let pending_trace = self.app.trace.as_ref().map(|trace| {
             trace.begin_call(
@@ -853,31 +988,34 @@ impl Repl {
                 LlmError::Input("turn scratchpad update returned an empty summary".to_string())
             })?
             .to_string();
-        let usage_info = response.usage.unwrap_or_default();
-        let input_tokens = if usage_info.prompt_tokens > 0 {
-            usage_info.prompt_tokens
+        let provider_usage = response.usage;
+        let input = if provider_usage.is_some_and(|usage| usage.prompt_tokens > 0) {
+            TokenCount::provider(provider_usage.unwrap_or_default().prompt_tokens)
         } else {
-            estimated_input_tokens
+            TokenCount::estimate(estimated_input_tokens)
         };
-        let output_tokens = if usage_info.completion_tokens > 0 {
-            usage_info.completion_tokens
+        let output = if provider_usage.is_some_and(|usage| usage.completion_tokens > 0) {
+            TokenCount::provider(provider_usage.unwrap_or_default().completion_tokens)
         } else {
-            crate::agent::tokens::estimate_text_tokens(&summary)
+            TokenCount::estimate(crate::agent::tokens::estimate_text_tokens(&summary))
         };
-        usage.add_call_with_breakdown(
+        usage.add_model_call_with_breakdown(
             "turn-scratchpad",
-            input_tokens + output_tokens,
-            input_tokens + output_tokens,
+            input,
+            output,
+            input.tokens + output.tokens,
             TokenBreakdown {
-                summary_inputs: input_tokens,
-                summary_outputs: output_tokens,
+                summary_inputs: input.tokens,
+                summary_outputs: output.tokens,
                 ..TokenBreakdown::default()
             },
         );
         self.debug_log(format!(
-            "turn_scratchpad_response input_tokens={} output_tokens={} summary_tokens={}",
-            input_tokens,
-            output_tokens,
+            "turn_scratchpad_response input_tokens={} input_source={} output_tokens={} output_source={} summary_tokens={}",
+            input.tokens,
+            input.source.label(),
+            output.tokens,
+            output.source.label(),
             crate::agent::tokens::estimate_text_tokens(&summary)
         ));
         Ok(TurnScratchpad { summary })
@@ -1078,16 +1216,23 @@ impl Repl {
     fn full_stats_text(&self) -> String {
         let current_context = self.current_context_tokens();
         let mut text = format!(
-            "session spent: {} | session raw-history would be: {} | session history saved: {} | context: {}/{}",
+            "session spent: {} (provider: {}, estimated fallback: {}) | session raw-history would be (estimated): {} | session history saved (estimated): {} | context (estimated): {}/{} | available: {}",
             self.app.stats.session_sent,
+            self.app.stats.session_provider_tokens,
+            self.app.stats.session_estimated_tokens,
             self.app.stats.session_would_be,
             self.app.stats.session_saved,
             current_context,
             self.app.config.context.max_tokens,
+            self.app
+                .config
+                .context
+                .max_tokens
+                .saturating_sub(current_context),
         );
         if self.app.stats.session_sent > 0 {
             text.push_str(
-                "\naccounting: spent is cumulative model I/O; history saved is prior raw history replaced by summaries; context is the final retained prompt.",
+                "\naccounting: provider counts are used when returned; fallback, context, would-be, and saved values are explicitly estimated.",
             );
         }
         if self.app.stats.session_sent > 0 {
@@ -1109,8 +1254,14 @@ impl Repl {
                 ));
                 for call in &turn.calls {
                     text.push_str(&format!(
-                        "\n  {} sent={} would_be={}",
-                        call.label, call.sent, call.would_be
+                        "\n  {} input={} ({}) output={} ({}) sent={} would_be_estimate={}",
+                        call.label,
+                        call.input_tokens,
+                        call.input_source.label(),
+                        call.output_tokens,
+                        call.output_source.label(),
+                        call.sent,
+                        call.would_be,
                     ));
                     text.push_str(&format_breakdown(&call.breakdown, call.sent, 4));
                 }
@@ -1152,10 +1303,49 @@ impl Repl {
 
     fn composer_status_line(&self) -> String {
         format!(
-            "{} | context: 0/{}",
+            "{} | context: 0/{} | / or Ctrl+O: commands",
             self.app.model.name,
             crate::tui::render::format_number(self.app.config.context.max_tokens as isize)
         )
+    }
+
+    fn context_text(&self) -> String {
+        let used = self.current_context_tokens();
+        let limit = self.app.config.context.max_tokens;
+        let available = limit.saturating_sub(used);
+        let percent = used.saturating_mul(100) / limit.max(1);
+        let rolling_summary = self
+            .app
+            .context
+            .summary()
+            .map(crate::agent::tokens::estimate_text_tokens)
+            .unwrap_or_default();
+        format!(
+            "context (estimated): {used}/{limit} ({percent}%) | available: {available}\nrolling summary (estimated): {rolling_summary} | raw history (estimated): {}\nprovider-reported session tokens: {} | estimated fallback: {} | history saved (estimated): {}",
+            self.app.context.raw_history_tokens(),
+            self.app.stats.session_provider_tokens,
+            self.app.stats.session_estimated_tokens,
+            self.app.stats.session_saved,
+        )
+    }
+
+    fn scratchpad_text(&self) -> String {
+        if self.last_scratchpad.summary.trim().is_empty() {
+            "turn scratchpad: none (no tool-driven context has been compacted yet)".to_string()
+        } else {
+            format!(
+                "turn scratchpad ({} estimated tokens):\n{}",
+                crate::agent::tokens::estimate_text_tokens(&self.last_scratchpad.summary),
+                self.last_scratchpad.summary.trim()
+            )
+        }
+    }
+
+    fn debug_status_text(&self) -> String {
+        match self.app.trace.as_ref() {
+            Some(trace) => format!("debug trace: {}", trace.path().display()),
+            None => "debug trace: off (start vyrn with --debug)".to_string(),
+        }
     }
 
     fn skills_text(&self) -> String {
@@ -1171,14 +1361,29 @@ impl Repl {
     }
 }
 
+fn help_text() -> String {
+    let mut lines = vec!["commands".to_string()];
+    lines.extend(
+        SLASH_COMMANDS
+            .iter()
+            .map(|command| format!("  {:<12} {}", command.name, command.description)),
+    );
+    lines.push("controls".to_string());
+    lines.push("  / or Ctrl+O  open command palette".to_string());
+    lines.push("  Up/Down      select command or recall prompt".to_string());
+    lines.push("  Tab           accept selected command".to_string());
+    lines.push("  Esc           cancel active turn; exit from composer".to_string());
+    lines.join("\n")
+}
+
 fn format_breakdown(breakdown: &TokenBreakdown, total: usize, limit: usize) -> String {
     let mut text = String::new();
     for item in breakdown.items().into_iter().take(limit) {
-        let pct = if total == 0 {
-            0
-        } else {
-            item.tokens.saturating_mul(100) / total
-        };
+        let pct = item
+            .tokens
+            .saturating_mul(100)
+            .checked_div(total)
+            .unwrap_or_default();
         text.push_str(&format!(
             "\n  {}: {} ({}%)",
             item.label,
@@ -1196,22 +1401,35 @@ fn unix_timestamp_millis() -> u128 {
         .unwrap_or_default()
 }
 
-pub async fn select_model(models: &ModelRegistry) -> anyhow::Result<ModelProfile> {
-    let profiles = models.list().cloned().collect::<Vec<_>>();
-    if profiles.is_empty() {
-        anyhow::bail!("no model profiles configured");
-    }
-
-    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        let _raw = RawModeGuard::enter()?;
-        return select_model_with_arrows(&profiles)?
-            .ok_or_else(|| anyhow::anyhow!("model selection canceled"));
-    }
-
-    select_model_by_number(&profiles)
+enum ModelPickerChoice {
+    Profile(ModelProfile),
+    ConfigureNew,
 }
 
-fn select_model_by_number(profiles: &[ModelProfile]) -> anyhow::Result<ModelProfile> {
+pub async fn select_model(
+    sources: &ConfigSources,
+    models: &mut ModelRegistry,
+) -> anyhow::Result<ModelProfile> {
+    let profiles = models.list().cloned().collect::<Vec<_>>();
+    if profiles.is_empty() {
+        return configure_and_insert_model(sources, models);
+    }
+
+    let choice = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        let _raw = RawModeGuard::enter()?;
+        select_model_with_arrows(&profiles)?
+            .ok_or_else(|| anyhow::anyhow!("model selection canceled"))?
+    } else {
+        select_model_by_number(&profiles)?
+    };
+
+    match choice {
+        ModelPickerChoice::Profile(profile) => Ok(profile),
+        ModelPickerChoice::ConfigureNew => configure_and_insert_model(sources, models),
+    }
+}
+
+fn select_model_by_number(profiles: &[ModelProfile]) -> anyhow::Result<ModelPickerChoice> {
     println!("configured models:");
     for (idx, profile) in profiles.iter().enumerate() {
         println!(
@@ -1222,20 +1440,27 @@ fn select_model_by_number(profiles: &[ModelProfile]) -> anyhow::Result<ModelProf
             profile.base_url
         );
     }
+    println!("{}. configure new model", profiles.len() + 1);
 
     print!("select model [1]: ");
     std::io::stdout().flush()?;
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
     let selected = input.trim().parse::<usize>().unwrap_or(1);
+    if selected == profiles.len() + 1 {
+        return Ok(ModelPickerChoice::ConfigureNew);
+    }
     let index = selected.saturating_sub(1);
     profiles
         .get(index)
         .cloned()
+        .map(ModelPickerChoice::Profile)
         .ok_or_else(|| anyhow::anyhow!("invalid model selection: {selected}"))
 }
 
-fn select_model_with_arrows(profiles: &[ModelProfile]) -> anyhow::Result<Option<ModelProfile>> {
+fn select_model_with_arrows(
+    profiles: &[ModelProfile],
+) -> anyhow::Result<Option<ModelPickerChoice>> {
     println!("\r\n{}", "models".with(STEEL_BLUE).bold());
     let mut selected = 0;
     render_model_picker(profiles, selected, false)?;
@@ -1251,18 +1476,24 @@ fn select_model_with_arrows(profiles: &[ModelProfile]) -> anyhow::Result<Option<
             }
             KeyCode::Enter => {
                 println!("\r");
-                return Ok(profiles.get(selected).cloned());
+                if selected == profiles.len() {
+                    return Ok(Some(ModelPickerChoice::ConfigureNew));
+                }
+                return Ok(profiles
+                    .get(selected)
+                    .cloned()
+                    .map(ModelPickerChoice::Profile));
             }
             KeyCode::Up => {
                 selected = if selected == 0 {
-                    profiles.len() - 1
+                    profiles.len()
                 } else {
                     selected - 1
                 };
                 render_model_picker(profiles, selected, true)?;
             }
             KeyCode::Down => {
-                selected = (selected + 1) % profiles.len();
+                selected = (selected + 1) % profiles.len().saturating_add(1);
                 render_model_picker(profiles, selected, true)?;
             }
             KeyCode::Home => {
@@ -1270,7 +1501,7 @@ fn select_model_with_arrows(profiles: &[ModelProfile]) -> anyhow::Result<Option<
                 render_model_picker(profiles, selected, true)?;
             }
             KeyCode::End => {
-                selected = profiles.len() - 1;
+                selected = profiles.len();
                 render_model_picker(profiles, selected, true)?;
             }
             _ => {}
@@ -1283,7 +1514,7 @@ fn render_model_picker(
     selected: usize,
     redraw: bool,
 ) -> anyhow::Result<()> {
-    let row_count = profiles.len().saturating_add(1);
+    let row_count = profiles.len().saturating_add(2);
     if redraw {
         execute!(
             std::io::stdout(),
@@ -1322,6 +1553,27 @@ fn render_model_picker(
         }
     }
 
+    execute!(
+        std::io::stdout(),
+        MoveToColumn(0),
+        Clear(ClearType::CurrentLine)
+    )?;
+    if selected == profiles.len() {
+        execute!(
+            std::io::stdout(),
+            SetForegroundColor(VY_VIOLET),
+            Print("> configure new model"),
+            ResetColor,
+            Print("\r\n")
+        )?;
+    } else {
+        execute!(
+            std::io::stdout(),
+            Print("  configure new model"),
+            Print("\r\n")
+        )?;
+    }
+
     let help = truncate_display(
         "Use Up/Down to choose, Enter to select, Esc to cancel.",
         max_chars,
@@ -1337,6 +1589,61 @@ fn render_model_picker(
     )?;
     std::io::stdout().flush()?;
     Ok(())
+}
+
+fn configure_and_insert_model(
+    sources: &ConfigSources,
+    models: &mut ModelRegistry,
+) -> anyhow::Result<ModelProfile> {
+    let profile = configure_model_profile(sources)?;
+    models.insert(profile.clone());
+    Ok(profile)
+}
+
+fn configure_model_profile(sources: &ConfigSources) -> anyhow::Result<ModelProfile> {
+    println!();
+    println!("{}", "configure model".with(STEEL_BLUE).bold());
+    println!("profiles are saved to {}", sources.global_models.display());
+
+    let name = prompt_with_default("profile name", "llama3")?;
+    let base_url = prompt_with_default("base URL", "http://localhost:11434/v1")?;
+    let model = prompt_with_default("model", "llama3.2")?;
+    let api_key = prompt_optional("API key (optional)")?;
+
+    let profile = ModelProfile {
+        name,
+        base_url,
+        model,
+        api_key,
+    };
+    crate::config::save_global_model_profile(sources, &profile)?;
+    println!("saved {}", sources.global_models.display());
+    Ok(profile)
+}
+
+fn prompt_with_default(label: &str, default: &str) -> anyhow::Result<String> {
+    loop {
+        print!("{label} [{default}]: ");
+        std::io::stdout().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let value = input.trim();
+        if value.is_empty() {
+            return Ok(default.to_string());
+        }
+        if !value.chars().any(char::is_whitespace) || label != "profile name" {
+            return Ok(value.to_string());
+        }
+        println!("profile name cannot contain whitespace");
+    }
+}
+
+fn prompt_optional(label: &str) -> anyhow::Result<String> {
+    print!("{label}: ");
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -1392,6 +1699,23 @@ impl Drop for RawModeGuard {
     fn drop(&mut self) {
         let _ = execute!(std::io::stdout(), DisableBracketedPaste);
         let _ = disable_raw_mode();
+    }
+}
+
+struct CookedModeGuard;
+
+impl CookedModeGuard {
+    fn enter() -> anyhow::Result<Self> {
+        execute!(std::io::stdout(), DisableBracketedPaste)?;
+        disable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for CookedModeGuard {
+    fn drop(&mut self) {
+        let _ = enable_raw_mode();
+        let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     }
 }
 
@@ -1529,17 +1853,17 @@ fn read_clarification_freeform(
                     true,
                 )?;
             }
-            KeyCode::Char(ch) => {
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                    input.push(ch);
-                    render_clarification_freeform(
-                        question,
-                        question_index,
-                        question_count,
-                        &input,
-                        true,
-                    )?;
-                }
+            KeyCode::Char(ch)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                input.push(ch);
+                render_clarification_freeform(
+                    question,
+                    question_index,
+                    question_count,
+                    &input,
+                    true,
+                )?;
             }
             _ => {}
         }
@@ -1801,6 +2125,20 @@ fn print_stats_panel(
             crate::tui::render::format_number(ledger.session_sent as isize),
             VY_TECH_STRONG,
         ),
+        (String::from("  provider "), VY_TEXT_MUTED),
+        (
+            crate::tui::render::format_number(ledger.session_provider_tokens as isize),
+            VY_TECH,
+        ),
+        (String::from("  fallback est. "), VY_TEXT_MUTED),
+        (
+            crate::tui::render::format_number(ledger.session_estimated_tokens as isize),
+            if ledger.session_estimated_tokens > 0 {
+                VY_TEXT_MUTED
+            } else {
+                VY_TEXT_DIM
+            },
+        ),
         (String::from("  raw-history would be "), VY_TEXT_MUTED),
         (
             crate::tui::render::format_number(ledger.session_would_be as isize),
@@ -1818,9 +2156,12 @@ fn print_stats_panel(
         (String::from("  context "), VY_TEXT_MUTED),
         (
             format!(
-                "{}/{}",
+                "{}/{} ({} available)",
                 crate::tui::render::format_number(current_context as isize),
-                crate::tui::render::format_number(max_context as isize)
+                crate::tui::render::format_number(max_context as isize),
+                crate::tui::render::format_number(
+                    max_context.saturating_sub(current_context) as isize
+                )
             ),
             VY_TECH,
         ),
@@ -1833,7 +2174,7 @@ fn print_stats_panel(
 
     print_stats_line(&[(
         String::from(
-            "spent is cumulative model I/O; saved is prior raw history replaced by summaries",
+            "provider counts win; fallback, context, would-be, and saved values are estimates",
         ),
         VY_TEXT_DIM,
     )])?;
@@ -1947,10 +2288,14 @@ fn read_composer_line(status: &str, history: &[String]) -> anyhow::Result<UserTu
 
 fn render_composer_state(state: &ComposerState, status: &str) -> anyhow::Result<()> {
     let completion_suffix = slash_completion_suffix(&state.input, &state.completion);
+    let palette = slash_completion_matches(&state.input);
+    let selected = active_slash_completion(&state.input, &state.completion);
     render_composer(
         &state.input,
         state.images.len(),
         completion_suffix.as_deref(),
+        &palette,
+        selected,
         status,
     )
 }
@@ -1988,6 +2333,22 @@ fn handle_composer_key(
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Ok(ComposerAction::Exit)
         }
+        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if state.input.trim().is_empty() {
+                reset_history_navigation(state);
+                state.input = "/".to_string();
+                reset_completion(&mut state.completion);
+            }
+            Ok(ComposerAction::Continue)
+        }
+        KeyCode::F(1) => {
+            if state.input.trim().is_empty() {
+                reset_history_navigation(state);
+                state.input = "/".to_string();
+                reset_completion(&mut state.completion);
+            }
+            Ok(ComposerAction::Continue)
+        }
         KeyCode::Esc => Ok(ComposerAction::Exit),
         KeyCode::Enter => {
             accept_slash_completion(state);
@@ -2000,11 +2361,19 @@ fn handle_composer_key(
             Ok(ComposerAction::Continue)
         }
         KeyCode::Up if key.modifiers.is_empty() => {
-            history_previous(state, history);
+            if state.input.starts_with('/') {
+                cycle_slash_completion(state, -1);
+            } else {
+                history_previous(state, history);
+            }
             Ok(ComposerAction::Continue)
         }
         KeyCode::Down if key.modifiers.is_empty() => {
-            history_next(state, history);
+            if state.input.starts_with('/') {
+                cycle_slash_completion(state, 1);
+            } else {
+                history_next(state, history);
+            }
             Ok(ComposerAction::Continue)
         }
         KeyCode::Tab => {
@@ -2123,12 +2492,8 @@ fn slash_completion_suffix(input: &str, completion: &CompletionState) -> Option<
 }
 
 fn active_slash_completion(input: &str, completion: &CompletionState) -> Option<&'static str> {
-    if let Some(command) = SLASH_COMMANDS
-        .iter()
-        .copied()
-        .find(|command| *command == input)
-    {
-        return Some(command);
+    if let Some(command) = SLASH_COMMANDS.iter().find(|command| command.name == input) {
+        return Some(command.name);
     }
     let matches = slash_completion_matches(input);
     if matches.is_empty() {
@@ -2139,18 +2504,33 @@ fn active_slash_completion(input: &str, completion: &CompletionState) -> Option<
     } else {
         0
     };
-    matches.get(index % matches.len()).copied()
+    matches
+        .get(index % matches.len())
+        .map(|command| command.name)
 }
 
-fn slash_completion_matches(input: &str) -> Vec<&'static str> {
+fn slash_completion_matches(input: &str) -> Vec<SlashCommand> {
     if !input.starts_with('/') || input.contains(' ') {
         return Vec::new();
     }
     SLASH_COMMANDS
         .iter()
         .copied()
-        .filter(|command| command.starts_with(input))
+        .filter(|command| command.name.starts_with(input))
         .collect::<Vec<_>>()
+}
+
+fn cycle_slash_completion(state: &mut ComposerState, direction: isize) {
+    let matches = slash_completion_matches(&state.input);
+    if matches.len() <= 1 {
+        return;
+    }
+    if state.completion.prefix != state.input {
+        state.completion.prefix = state.input.clone();
+        state.completion.index = 0;
+    }
+    let len = matches.len() as isize;
+    state.completion.index = (state.completion.index as isize + direction).rem_euclid(len) as usize;
 }
 
 fn paste_from_clipboard(state: &mut ComposerState) {
@@ -2179,6 +2559,8 @@ fn render_composer(
     input: &str,
     image_count: usize,
     completion_suffix: Option<&str>,
+    palette: &[SlashCommand],
+    selected_command: Option<&str>,
     status: &str,
 ) -> anyhow::Result<()> {
     let mut stdout = std::io::stdout();
@@ -2217,6 +2599,21 @@ fn render_composer(
             Print(completion_suffix)
         )?;
     }
+    for command in palette {
+        let selected = selected_command == Some(command.name);
+        execute!(
+            stdout,
+            ResetColor,
+            Print("\r\n"),
+            MoveToColumn(0),
+            Clear(ClearType::CurrentLine),
+            SetForegroundColor(if selected { VY_VIOLET } else { VY_TEXT_MUTED }),
+            Print(if selected { "> " } else { "  " }),
+            Print(format!("{:<12}", command.name)),
+            SetForegroundColor(VY_TEXT_DIM),
+            Print(command.description)
+        )?;
+    }
     execute!(
         stdout,
         ResetColor,
@@ -2226,7 +2623,7 @@ fn render_composer(
         SetForegroundColor(VY_TEXT_DIM),
         Print(status),
         ResetColor,
-        MoveUp(2),
+        MoveUp((2 + palette.len()) as u16),
         MoveToColumn((2 + input.chars().count()) as u16)
     )?;
     stdout.flush()?;
@@ -2255,7 +2652,7 @@ fn clear_screen() -> anyhow::Result<()> {
 }
 
 fn print_welcome(app: &App) -> anyhow::Result<()> {
-    let width = terminal_width().min(78).max(56);
+    let width = terminal_width().clamp(56, 78);
     let border = "-".repeat(width.saturating_sub(2));
     print_welcome_line(format!("+{border}+").with(STEEL_BLUE))?;
     print_welcome_line(banner_line(" __     __ __   __ ____  _   _ ", width).with(STEEL_BLUE))?;
@@ -2272,6 +2669,7 @@ fn print_welcome(app: &App) -> anyhow::Result<()> {
         app.model.name.as_str().with(STEEL_BLUE),
         format!("context {}", app.config.context.max_tokens).with(VY_TEXT_DIM)
     ))?;
+    print_welcome_line("type / or press Ctrl+O for commands".with(VY_TEXT_DIM))?;
     execute!(std::io::stdout(), Print("\r\n"))?;
     std::io::stdout().flush()?;
     Ok(())
@@ -2817,14 +3215,24 @@ fn truncate_display(value: &str, max_chars: usize) -> String {
     out
 }
 
-fn select_model_inline(models: &ModelRegistry) -> anyhow::Result<Option<ModelProfile>> {
+fn select_model_inline(
+    sources: &ConfigSources,
+    models: &mut ModelRegistry,
+) -> anyhow::Result<Option<ModelProfile>> {
     let profiles = models.list().cloned().collect::<Vec<_>>();
     if profiles.is_empty() {
-        print_system_block("no model profiles configured")?;
-        return Ok(None);
+        let _cooked = CookedModeGuard::enter()?;
+        return configure_and_insert_model(sources, models).map(Some);
     }
 
-    select_model_with_arrows(&profiles)
+    match select_model_with_arrows(&profiles)? {
+        Some(ModelPickerChoice::Profile(profile)) => Ok(Some(profile)),
+        Some(ModelPickerChoice::ConfigureNew) => {
+            let _cooked = CookedModeGuard::enter()?;
+            configure_and_insert_model(sources, models).map(Some)
+        }
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -2908,6 +3316,58 @@ mod tests {
         assert_eq!(
             slash_completion_suffix(&state.input, &state.completion).as_deref(),
             Some("ts")
+        );
+    }
+
+    #[test]
+    fn slash_prefix_lists_the_full_command_palette() {
+        let commands = slash_completion_matches("/");
+        let names = commands
+            .iter()
+            .map(|command| command.name)
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"/help"));
+        assert!(names.contains(&"/stats"));
+        assert!(names.contains(&"/context"));
+        assert!(names.contains(&"/scratchpad"));
+        assert!(names.contains(&"/debug"));
+    }
+
+    #[test]
+    fn control_o_opens_command_palette_from_empty_composer() {
+        let mut state = ComposerState::default();
+
+        let action = handle_composer_key(
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            &mut state,
+            &[],
+        )
+        .unwrap();
+
+        assert!(matches!(action, ComposerAction::Continue));
+        assert_eq!(state.input, "/");
+        assert!(!slash_completion_matches(&state.input).is_empty());
+    }
+
+    #[test]
+    fn command_palette_uses_arrows_to_change_selection() {
+        let mut state = ComposerState {
+            input: "/".to_string(),
+            ..Default::default()
+        };
+        let first = active_slash_completion(&state.input, &state.completion).unwrap();
+
+        handle_composer_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut state,
+            &[],
+        )
+        .unwrap();
+
+        assert_ne!(
+            active_slash_completion(&state.input, &state.completion),
+            Some(first)
         );
     }
 

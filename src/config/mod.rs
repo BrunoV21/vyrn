@@ -1,7 +1,9 @@
 pub mod models;
 pub mod paths;
 
-pub use models::{ModelProfile, ModelRegistry, ModelState, load_model_profiles};
+pub use models::{
+    ModelProfile, ModelRegistry, ModelState, load_model_profiles, save_global_model_profile,
+};
 pub use paths::ConfigSources;
 
 use serde::{Deserialize, Serialize};
@@ -20,6 +22,11 @@ pub enum ConfigError {
         path: String,
         source: toml::de::Error,
     },
+    #[error("failed to write {path}: {source}")]
+    Write {
+        path: String,
+        source: std::io::Error,
+    },
     #[error(
         "no model profiles found; create ~/.vyrn/models.toml (recommended) or .vyrn/models.toml"
     )]
@@ -30,10 +37,11 @@ pub enum ConfigError {
     MissingDefaultModel(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SummaryAggressiveness {
     Low,
+    #[default]
     Medium,
     High,
 }
@@ -48,13 +56,7 @@ impl std::fmt::Display for SummaryAggressiveness {
     }
 }
 
-impl Default for SummaryAggressiveness {
-    fn default() -> Self {
-        Self::Medium
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct EffectiveConfig {
     pub context: ContextConfig,
@@ -76,7 +78,7 @@ pub struct AgentConfig {
     pub stream: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ManifestConfig {
     pub auto_refresh: bool,
@@ -107,16 +109,6 @@ struct PartialManifestConfig {
     auto_refresh: Option<bool>,
 }
 
-impl Default for EffectiveConfig {
-    fn default() -> Self {
-        Self {
-            context: ContextConfig::default(),
-            agent: AgentConfig::default(),
-            manifest: ManifestConfig::default(),
-        }
-    }
-}
-
 impl Default for ContextConfig {
     fn default() -> Self {
         Self {
@@ -131,14 +123,6 @@ impl Default for AgentConfig {
         Self {
             default_model: "llama3".to_string(),
             stream: true,
-        }
-    }
-}
-
-impl Default for ManifestConfig {
-    fn default() -> Self {
-        Self {
-            auto_refresh: false,
         }
     }
 }

@@ -74,6 +74,7 @@ api_key = ""
     let output_dir = temp.path().join(".vyrn/eval-runs/test");
     let output = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .current_dir(temp.path())
+        .env("HOME", temp.path())
         .arg("eval")
         .arg("evals/basic.json")
         .arg("--output")
@@ -159,6 +160,7 @@ api_key = ""
 
     let output = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .current_dir(temp.path())
+        .env("HOME", temp.path())
         .arg("eval")
         .arg("evals/fail.json")
         .output()
@@ -251,6 +253,7 @@ api_key = ""
     let output_dir = temp.path().join(".vyrn/eval-runs/context");
     let output = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .current_dir(temp.path())
+        .env("HOME", temp.path())
         .arg("--context")
         .arg("1200")
         .arg("eval")
@@ -422,6 +425,7 @@ api_key = ""
     let output_dir = temp.path().join(".vyrn/eval-runs/many-tools");
     let output = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .current_dir(temp.path())
+        .env("HOME", temp.path())
         .arg("--context")
         .arg("1500")
         .arg("eval")
@@ -456,13 +460,9 @@ api_key = ""
             .count(),
         3
     );
-    assert!(
-        std::fs::read_to_string(output_dir.join("many-large-tools/debug.log"))
-            .unwrap()
-            .matches("tool_chain_prepare")
-            .count()
-            >= 3
-    );
+    let debug_log = std::fs::read_to_string(output_dir.join("many-large-tools/debug.log")).unwrap();
+    assert_eq!(debug_log.matches("tool_chain_prepare").count(), 1);
+    assert!(debug_log.contains("tools=3"), "{debug_log}");
 }
 
 fn read_http_body(stream: &mut TcpStream) -> String {

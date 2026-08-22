@@ -20,17 +20,29 @@ pub struct Cli {
     #[arg(long)]
     pub verbose: bool,
 
-    /// Show provider URLs, HTTP status/body, and append request-level details to .vyrn/debug.log.
+    /// Show provider/network details and write structured session trace JSON.
     #[arg(long)]
     pub debug: bool,
+
+    /// Run one prompt non-interactively, then exit.
+    #[arg(short = 'p', long, value_name = "PROMPT")]
+    pub prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Commands {
+    /// Initialize the local .vyrn directory and seed project config files.
+    Init,
     /// Run JSON-defined live agent evals.
     Eval(EvalArgs),
     /// Write the local static debug trace viewer and print its path.
-    DebugViewer,
+    DebugViewer(DebugViewerArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DebugViewerArgs {
+    /// Embed this trace JSON so the generated viewer opens it immediately.
+    pub trace: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]

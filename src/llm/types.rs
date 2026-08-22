@@ -10,6 +10,15 @@ pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<Value>,
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StreamOptions {
+    pub include_usage: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -1,5 +1,5 @@
 use crate::agent::prompt::build_summary_refresh_messages;
-use crate::agent::tokens::{estimate_messages_breakdown, estimate_text_tokens};
+use crate::agent::tokens::{TokenSource, estimate_messages_breakdown, estimate_text_tokens};
 use crate::agent::transcript::Exchange;
 use crate::config::SummaryAggressiveness;
 use crate::debug_trace::{TraceMetadata, TraceRecorder};
@@ -93,6 +93,8 @@ impl ContextManager {
             tools: Vec::new(),
             tool_choice: None,
             stream: false,
+            stream_options: None,
+            max_tokens: Some(384),
         };
         let pending = trace
             .as_ref()
@@ -112,12 +114,12 @@ impl ContextManager {
         } else {
             estimate_text_tokens(&summary)
         };
-        let usage = response.usage;
-        let input_tokens = usage
+        let provider_usage = response.usage;
+        let input_tokens = provider_usage
             .map(|usage| usage.prompt_tokens)
             .filter(|tokens| *tokens > 0)
             .unwrap_or(input_tokens);
-        let output_tokens = usage
+        let output_tokens = provider_usage
             .map(|usage| usage.completion_tokens)
             .filter(|tokens| *tokens > 0)
             .unwrap_or(estimated_output_tokens);
@@ -125,6 +127,16 @@ impl ContextManager {
         Ok(Some(SummaryRefreshUsage {
             input_tokens,
             output_tokens,
+            input_source: if provider_usage.is_some_and(|usage| usage.prompt_tokens > 0) {
+                TokenSource::Provider
+            } else {
+                TokenSource::Estimate
+            },
+            output_source: if provider_usage.is_some_and(|usage| usage.completion_tokens > 0) {
+                TokenSource::Provider
+            } else {
+                TokenSource::Estimate
+            },
         }))
     }
 }
@@ -133,4 +145,6 @@ impl ContextManager {
 pub struct SummaryRefreshUsage {
     pub input_tokens: usize,
     pub output_tokens: usize,
+    pub input_source: TokenSource,
+    pub output_source: TokenSource,
 }

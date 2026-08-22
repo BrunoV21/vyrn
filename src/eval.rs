@@ -1,7 +1,7 @@
 use crate::agent::context::ContextManager;
 use crate::agent::prompt::build_agent_prompt;
 use crate::agent::tokens::{
-    TokenBreakdown, TokenLedger, TurnUsage, estimate_assistant_output_tokens,
+    TokenBreakdown, TokenCount, TokenLedger, TurnUsage, estimate_assistant_output_tokens,
     estimate_chat_request_breakdown, estimate_messages_breakdown, estimate_text_tokens,
     estimate_unpruned_request_tokens,
 };
@@ -15,7 +15,7 @@ use crate::config::{ConfigSources, EffectiveConfig, ModelProfile, ModelRegistry}
 use crate::debug_trace::{TraceMetadata, TraceRecorder};
 use crate::llm::{
     ChatCompletionRequest, ChatMessage, ImageAttachment, LlmError, OpenAiClient, StreamEvent,
-    ToolCall,
+    StreamOptions, ToolCall,
 };
 use crate::mcp::McpRegistry;
 use crate::skills::SkillRegistry;
@@ -636,6 +636,8 @@ async fn judge_assertion(
         tools: Vec::new(),
         tool_choice: None,
         stream: false,
+        stream_options: None,
+        max_tokens: Some(256),
     };
     let pending_trace = llm_trace.as_ref().map(|trace_recorder| {
         trace_recorder.begin_call(
@@ -796,9 +798,16 @@ impl EvalAgentRunner {
             .await?
         {
             let summary_total = summary_usage.input_tokens + summary_usage.output_tokens;
-            usage.add_call_with_breakdown(
+            usage.add_model_call_with_breakdown(
                 "summary",
-                summary_total,
+                TokenCount {
+                    tokens: summary_usage.input_tokens,
+                    source: summary_usage.input_source,
+                },
+                TokenCount {
+                    tokens: summary_usage.output_tokens,
+                    source: summary_usage.output_source,
+                },
                 summary_total,
                 TokenBreakdown {
                     summary_inputs: summary_usage.input_tokens,
@@ -863,6 +872,10 @@ impl EvalAgentRunner {
                 tools: tool_schemas.clone(),
                 tool_choice: None,
                 stream: true,
+                stream_options: Some(StreamOptions {
+                    include_usage: true,
+                }),
+                max_tokens: None,
             };
             let pending_trace = self.llm_trace.as_ref().map(|llm_trace| {
                 llm_trace.begin_call(
@@ -911,17 +924,31 @@ impl EvalAgentRunner {
                 .first()
                 .map(|choice| choice.message.clone())
                 .ok_or(LlmError::MissingChoice)?;
-            let output_tokens = response
-                .usage
+            let provider_usage = response.usage;
+            let input = provider_usage
+                .map(|usage| usage.prompt_tokens)
+                .filter(|tokens| *tokens > 0)
+                .map(TokenCount::provider)
+                .unwrap_or_else(|| TokenCount::estimate(request_tokens));
+            let output = provider_usage
                 .map(|usage| usage.completion_tokens)
                 .filter(|tokens| *tokens > 0)
-                .unwrap_or_else(|| estimate_assistant_output_tokens(&message));
+                .map(TokenCount::provider)
+                .unwrap_or_else(|| {
+                    TokenCount::estimate(estimate_assistant_output_tokens(&message))
+                });
+            let output_tokens = output.tokens;
             let mut call_breakdown = request_breakdown;
             call_breakdown.assistant_outputs += output_tokens;
-            usage.add_call_with_breakdown(
+            let would_be = input
+                .tokens
+                .saturating_add(request_would_be.saturating_sub(request_tokens))
+                .saturating_add(output.tokens);
+            usage.add_model_call_with_breakdown(
                 format!("agent-{round}"),
-                request_tokens + output_tokens,
-                request_would_be + output_tokens,
+                input,
+                output,
+                would_be,
                 call_breakdown,
             );
 
@@ -955,17 +982,16 @@ impl EvalAgentRunner {
             }
 
             let assistant_tool_message = message;
+            let tool_count = tool_calls.len();
             current_tool_batch = vec![assistant_tool_message.clone()];
-            for (tool_index, call) in tool_calls.into_iter().enumerate() {
+            for call in tool_calls {
                 let result = self.execute_tool_call(&call).await;
-                let mut incremental_batch = vec![assistant_tool_message.clone()];
                 match &result {
                     Ok(tool_result) => {
                         let tool_message = ChatMessage::tool(
                             call.id.clone(),
                             truncate(&tool_result.content, 8000),
                         );
-                        incremental_batch.push(tool_message.clone());
                         current_tool_batch.push(tool_message);
                         trace.events.push(EvalTraceEvent::ToolOk {
                             round,
@@ -985,14 +1011,12 @@ impl EvalAgentRunner {
                                 format!("Attached image(s) from read_image: {sources}"),
                                 &tool_images,
                             );
-                            incremental_batch.push(image_message.clone());
                             current_tool_batch.push(image_message);
                         }
                     }
                     Err(error) => {
                         let content = format!("tool error: {error}");
                         let tool_message = ChatMessage::tool(call.id.clone(), content);
-                        incremental_batch.push(tool_message.clone());
                         current_tool_batch.push(tool_message);
                         trace.events.push(EvalTraceEvent::ToolError {
                             round,
@@ -1002,42 +1026,42 @@ impl EvalAgentRunner {
                     }
                 }
                 trace.tool_calls.push(call);
-                scratchpad = self
-                    .update_turn_scratchpad(
-                        &scratchpad,
-                        &incremental_batch,
-                        &assistant_tool_message,
-                        &mut usage,
-                        round,
-                        tool_index,
-                    )
-                    .await?;
-                let next_context = prepare_next_turn_context(
-                    &base_messages,
+            }
+            scratchpad = self
+                .update_turn_scratchpad(
                     &scratchpad,
                     &current_tool_batch,
-                    &tool_schemas,
-                    self.config.context.max_tokens,
-                )?;
-                scratchpad = next_context.scratchpad;
-                current_tool_batch = next_context.tool_batch;
-                trace.events.push(EvalTraceEvent::Scratchpad {
+                    &assistant_tool_message,
+                    &mut usage,
                     round,
-                    summary: scratchpad.summary.clone(),
-                });
-                let preparation = next_context.preparation;
-                self.debug_log(format!(
-                    "tool_chain_prepare round={} tool_index={} before_tokens={} after_tokens={} threshold={} max_context={} scratchpad_tokens={} current_batch_messages={}",
-                    round,
-                    tool_index,
-                    preparation.before_tokens,
-                    preparation.after_tokens,
-                    preparation.threshold,
-                    preparation.max_tokens,
-                    estimate_text_tokens(&scratchpad.summary),
-                    current_tool_batch.len()
-                ));
-            }
+                    tool_count.saturating_sub(1),
+                )
+                .await?;
+            let next_context = prepare_next_turn_context(
+                &base_messages,
+                &scratchpad,
+                &current_tool_batch,
+                &tool_schemas,
+                self.config.context.max_tokens,
+            )?;
+            scratchpad = next_context.scratchpad;
+            current_tool_batch = next_context.tool_batch;
+            trace.events.push(EvalTraceEvent::Scratchpad {
+                round,
+                summary: scratchpad.summary.clone(),
+            });
+            let preparation = next_context.preparation;
+            self.debug_log(format!(
+                "tool_chain_prepare round={} tools={} before_tokens={} after_tokens={} threshold={} max_context={} scratchpad_tokens={} current_batch_messages={}",
+                round,
+                tool_count,
+                preparation.before_tokens,
+                preparation.after_tokens,
+                preparation.threshold,
+                preparation.max_tokens,
+                estimate_text_tokens(&scratchpad.summary),
+                current_tool_batch.len()
+            ));
             if round + 1 == max_rounds {
                 hit_tool_round_limit = true;
             }
@@ -1103,6 +1127,8 @@ impl EvalAgentRunner {
             tools: Vec::new(),
             tool_choice: None,
             stream: false,
+            stream_options: None,
+            max_tokens: Some(384),
         };
         let pending_trace = self.llm_trace.as_ref().map(|llm_trace| {
             llm_trace.begin_call(
@@ -1135,31 +1161,34 @@ impl EvalAgentRunner {
                 LlmError::Input("turn scratchpad update returned an empty summary".to_string())
             })?
             .to_string();
-        let usage_info = response.usage.unwrap_or_default();
-        let input_tokens = if usage_info.prompt_tokens > 0 {
-            usage_info.prompt_tokens
+        let provider_usage = response.usage;
+        let input = if provider_usage.is_some_and(|usage| usage.prompt_tokens > 0) {
+            TokenCount::provider(provider_usage.unwrap_or_default().prompt_tokens)
         } else {
-            estimated_input_tokens
+            TokenCount::estimate(estimated_input_tokens)
         };
-        let output_tokens = if usage_info.completion_tokens > 0 {
-            usage_info.completion_tokens
+        let output = if provider_usage.is_some_and(|usage| usage.completion_tokens > 0) {
+            TokenCount::provider(provider_usage.unwrap_or_default().completion_tokens)
         } else {
-            estimate_text_tokens(&summary)
+            TokenCount::estimate(estimate_text_tokens(&summary))
         };
-        usage.add_call_with_breakdown(
+        usage.add_model_call_with_breakdown(
             "turn-scratchpad",
-            input_tokens + output_tokens,
-            input_tokens + output_tokens,
+            input,
+            output,
+            input.tokens + output.tokens,
             TokenBreakdown {
-                summary_inputs: input_tokens,
-                summary_outputs: output_tokens,
+                summary_inputs: input.tokens,
+                summary_outputs: output.tokens,
                 ..TokenBreakdown::default()
             },
         );
         self.debug_log(format!(
-            "turn_scratchpad_response input_tokens={} output_tokens={} summary_tokens={}",
-            input_tokens,
-            output_tokens,
+            "turn_scratchpad_response input_tokens={} input_source={} output_tokens={} output_source={} summary_tokens={}",
+            input.tokens,
+            input.source.label(),
+            output.tokens,
+            output.source.label(),
             estimate_text_tokens(&summary)
         ));
         Ok(TurnScratchpad { summary })

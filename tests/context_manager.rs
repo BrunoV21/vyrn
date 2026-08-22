@@ -1,8 +1,8 @@
-use vyrn::agent::tokens::TokenLedger;
 use vyrn::agent::tokens::{
     TokenBreakdown, TurnUsage, estimate_assistant_output_tokens, estimate_chat_request_breakdown,
     estimate_messages_breakdown, estimate_unpruned_request_tokens,
 };
+use vyrn::agent::tokens::{TokenCount, TokenLedger};
 use vyrn::agent::transcript::Exchange;
 use vyrn::config::SummaryAggressiveness;
 use vyrn::llm::types::ToolCallFunction;
@@ -72,6 +72,27 @@ fn token_ledger_accumulates_savings() {
     assert_eq!(ledger.turns[0].breakdown.system_prompt, 20);
     assert_eq!(ledger.turns[0].breakdown.user_requests, 30);
     assert_eq!(ledger.turns[0].breakdown.tool_schemas, 50);
+}
+
+#[test]
+fn token_ledger_separates_provider_counts_from_fallback_estimates() {
+    let mut ledger = TokenLedger::default();
+    let mut turn = TurnUsage::default();
+    turn.add_model_call_with_breakdown(
+        "agent",
+        TokenCount::provider(80),
+        TokenCount::estimate(20),
+        140,
+        TokenBreakdown::other(100),
+    );
+
+    ledger.push_turn(turn);
+
+    assert_eq!(ledger.session_sent, 100);
+    assert_eq!(ledger.session_provider_tokens, 80);
+    assert_eq!(ledger.session_estimated_tokens, 20);
+    assert_eq!(ledger.turns[0].calls[0].input_source.label(), "provider");
+    assert_eq!(ledger.turns[0].calls[0].output_source.label(), "estimate");
 }
 
 #[test]

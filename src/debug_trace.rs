@@ -1,4 +1,6 @@
-use crate::agent::tokens::{TokenBreakdown, estimate_assistant_output_tokens};
+use crate::agent::tokens::{
+    TokenBreakdown, TokenSource, estimate_assistant_output_tokens, estimate_messages_breakdown,
+};
 use crate::config::ConfigSources;
 use crate::llm::types::{ChatCompletionResponse, Usage};
 use crate::llm::{ChatCompletionRequest, LlmError, OpenAiClient};
@@ -8,7 +10,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-const TRACE_SCHEMA_VERSION: u32 = 1;
+const TRACE_SCHEMA_VERSION: u32 = 2;
 const VIEWER_HTML: &str = r##"<!doctype html>
 <html lang="en">
 <head>
@@ -69,12 +71,30 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
     .metric { border: 1px solid var(--vy-border); border-radius: 10px; padding: 12px; background: rgba(6, 7, 10, .55); }
     .metric b { display: block; color: var(--vy-tech); margin-bottom: 6px; }
+    .lanes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+    .lane { min-width: 0; }
+    .lane > h2 { position: sticky; top: 0; z-index: 2; margin: 0; padding: 12px; background: rgba(6, 7, 10, .94); border-bottom: 1px solid var(--vy-border); }
+    .lane.interactions > h2 { color: var(--vy-violet); }
+    .lane.harness > h2 { color: var(--vy-tech); }
+    .lane-empty { color: var(--vy-text-dim); padding: 18px 4px; }
     details { border: 1px solid var(--vy-border); border-radius: 12px; padding: 12px; margin: 12px 0; background: rgba(6, 7, 10, .46); }
     summary { cursor: pointer; color: var(--vy-tech-strong); }
     .tag { color: var(--vy-bg); background: var(--vy-tech); padding: 2px 7px; border-radius: 999px; margin-right: 8px; }
+    .interactions .tag { background: var(--vy-violet); color: var(--vy-text-primary); }
     .error { color: var(--vy-red); }
     .ok { color: var(--vy-success); }
     .muted { color: var(--vy-text-dim); }
+    .token-line { margin: 10px 0 0; color: var(--vy-text-muted); line-height: 1.6; }
+    .token-line strong { color: var(--vy-tech-strong); }
+    .source-provider { color: var(--vy-success); }
+    .source-estimate { color: var(--vy-amber); }
+    .messages { display: grid; gap: 8px; margin: 12px 0; }
+    .message { border-left: 3px solid var(--vy-border-strong); background: var(--vy-surface); padding: 10px; }
+    .message.user { border-left-color: var(--vy-violet); }
+    .message.assistant { border-left-color: var(--vy-tech); }
+    .message.system, .message.tool { border-left-color: var(--vy-border-strong); }
+    .message-head { display: flex; justify-content: space-between; gap: 8px; color: var(--vy-text-muted); margin-bottom: 7px; }
+    .message-body { color: var(--vy-text-primary); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
     pre {
       overflow: auto;
       max-height: 520px;
@@ -108,12 +128,13 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       background: rgba(6, 7, 10, .55);
     }
     .path-row code { color: var(--vy-tech-strong); overflow-wrap: anywhere; }
+    @media (max-width: 860px) { .lanes { grid-template-columns: 1fr; } .lane > h2 { position: static; } }
   </style>
 </head>
 <body>
   <main>
     <h1>vyrn debug trace viewer</h1>
-    <p>Load a <code>llm-trace.json</code> or session trace from <code>.vyrn/debug/sessions/</code>. Data stays in this browser tab.</p>
+    <p>Load a session trace to inspect human/agent interactions beside harness compaction and scratchpad work. Provider counts and estimates stay visibly separate. Data stays in this browser tab.</p>
     <section class="panel drop" id="drop">
       Drop a trace JSON file here, or choose one:
       <input id="file" type="file" accept="application/json,.json">
@@ -127,6 +148,8 @@ const VIEWER_HTML: &str = r##"<!doctype html>
   </main>
   <script>
     const TRACE_HINTS = __VYRN_TRACE_HINTS__;
+    const EMBEDDED_TRACE = __VYRN_EMBEDDED_TRACE__;
+    const EMBEDDED_TRACE_NAME = __VYRN_EMBEDDED_TRACE_NAME__;
     const file = document.getElementById('file');
     const drop = document.getElementById('drop');
     const content = document.getElementById('content');
@@ -140,6 +163,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       if (event.dataTransfer.files[0]) load(event.dataTransfer.files[0]);
     });
     renderHints();
+    if (EMBEDDED_TRACE) render(EMBEDDED_TRACE, EMBEDDED_TRACE_NAME);
 
     function renderHints() {
       const rows = [
@@ -176,12 +200,17 @@ const VIEWER_HTML: &str = r##"<!doctype html>
             ${metric('session', trace.session_id || trace.eval_case_id || 'unknown')}
             ${metric('model', `${trace.model_name || ''} ${trace.model || ''}`.trim())}
             ${metric('calls', calls.length)}
+            ${metric('provider tokens', providerTotal(trace))}
+            ${metric('estimated fallback', estimateFallbackTotal(trace))}
             ${metric('started', formatTime(trace.started_at_ms))}
             ${metric('ended', formatTime(trace.ended_at_ms))}
           </div>
           <input id="search" type="search" placeholder="filter by action, text, tool, call id">
         </section>
-        <section id="calls"></section>
+        <section class="lanes">
+          <div class="lane interactions"><h2>human + agent</h2><div id="interaction-calls"></div></div>
+          <div class="lane harness"><h2>harness internals</h2><div id="harness-calls"></div></div>
+        </section>
       `;
       const search = document.getElementById('search');
       search.addEventListener('input', () => renderCalls(calls, search.value));
@@ -189,13 +218,21 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     }
 
     function renderCalls(calls, query) {
-      const target = document.getElementById('calls');
       const needle = query.trim().toLowerCase();
       const filtered = needle ? calls.filter(call => JSON.stringify(call).toLowerCase().includes(needle)) : calls;
-      target.innerHTML = filtered.map(call => callPanel(call)).join('');
-      target.querySelectorAll('button[data-copy]').forEach(button => {
+      const interactions = filtered.filter(call => (call.action_scope || scopeFor(call)) === 'interaction');
+      const harness = filtered.filter(call => (call.action_scope || scopeFor(call)) !== 'interaction');
+      renderLane(document.getElementById('interaction-calls'), interactions);
+      renderLane(document.getElementById('harness-calls'), harness);
+      document.querySelectorAll('.lanes button[data-copy]').forEach(button => {
         button.addEventListener('click', () => navigator.clipboard.writeText(button.dataset.copy));
       });
+    }
+
+    function renderLane(target, calls) {
+      target.innerHTML = calls.length
+        ? calls.map(call => callPanel(call)).join('')
+        : '<div class="lane-empty">no matching actions</div>';
     }
 
     function callPanel(call) {
@@ -203,6 +240,9 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       const state = call.error ? '<span class="error">error</span>' : '<span class="ok">ok</span>';
       return `<details class="panel">
         <summary><span class="tag">${escapeHtml(call.action_type || 'call')}</span>${escapeHtml(title)} ${state} <span class="muted">${call.duration_ms || 0}ms</span></summary>
+        ${tokenLine(call)}
+        ${contextLine(call)}
+        ${messageTimeline(call)}
         ${jsonBlock('metadata', metadata(call))}
         ${jsonBlock('request', call.request)}
         ${jsonBlock('response', call.response)}
@@ -214,6 +254,101 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       const { request, response, error, ...rest } = call;
       return rest;
     }
+
+    function tokenLine(call) {
+      const accounting = normalizedAccounting(call);
+      const effective = accounting.effective;
+      const provider = accounting.provider;
+      const estimate = accounting.estimate;
+      const promptSource = sourceBadge(effective.prompt_source);
+      const completionSource = sourceBadge(effective.completion_source);
+      const providerText = provider
+        ? `provider ${number(provider.prompt_tokens)} in / ${number(provider.completion_tokens)} out / ${number(provider.total_tokens || provider.prompt_tokens + provider.completion_tokens)} total`
+        : 'provider usage not returned';
+      return `<div class="token-line"><strong>effective</strong> ${number(effective.prompt_tokens)} in ${promptSource} · ${number(effective.completion_tokens)} out ${completionSource} · ${number(effective.total_tokens)} total<br><span class="muted">${providerText} · estimate ${number(estimate.prompt_tokens)} in / ${number(estimate.completion_tokens)} out</span></div>`;
+    }
+
+    function contextLine(call) {
+      const context = normalizedAccounting(call).context;
+      if (!context) return '';
+      return `<div class="token-line"><strong>context</strong> ${number(context.used_input_tokens)}/${number(context.limit_tokens)} · ${number(context.available_input_tokens)} available</div>`;
+    }
+
+    function messageTimeline(call) {
+      const messages = call.request?.messages || [];
+      const estimates = call.message_token_estimates || [];
+      const rows = messages.map((message, index) => {
+        const estimate = estimates.find(item => item.index === index)?.estimated_tokens;
+        return messageCard(message.role || 'unknown', messageText(message), estimate);
+      });
+      const responseMessage = call.response?.choices?.[0]?.message;
+      if (responseMessage) {
+        rows.push(messageCard('assistant', messageText(responseMessage), normalizedAccounting(call).estimate.completion_tokens));
+      }
+      return rows.length ? `<div class="messages">${rows.join('')}</div>` : '';
+    }
+
+    function messageCard(role, body, estimatedTokens) {
+      return `<div class="message ${escapeAttr(role)}"><div class="message-head"><strong>${escapeHtml(role)}</strong><span class="source-estimate">${number(estimatedTokens || 0)} tokens est.</span></div><div class="message-body">${escapeHtml(body)}</div></div>`;
+    }
+
+    function messageText(message) {
+      const content = message?.content;
+      let text = typeof content === 'string' ? content : Array.isArray(content)
+        ? content.map(part => part.type === 'text' ? part.text : `[${part.type || 'attachment'}]`).join('\n')
+        : '';
+      const calls = message?.tool_calls || [];
+      if (calls.length) text += `${text ? '\n\n' : ''}${calls.map(call => `tool ${call.function?.name || 'unknown'}(${call.function?.arguments || ''})`).join('\n')}`;
+      return text || '(empty message)';
+    }
+
+    function normalizedAccounting(call) {
+      if (call.token_accounting) return call.token_accounting;
+      const provider = call.usage || null;
+      const estimate = {
+        prompt_tokens: call.estimated_input_tokens || 0,
+        completion_tokens: call.estimated_output_tokens || 0,
+        total_tokens: (call.estimated_input_tokens || 0) + (call.estimated_output_tokens || 0)
+      };
+      const effective = {
+        prompt_tokens: provider?.prompt_tokens || estimate.prompt_tokens,
+        prompt_source: provider?.prompt_tokens ? 'provider' : 'estimate',
+        completion_tokens: provider?.completion_tokens || estimate.completion_tokens,
+        completion_source: provider?.completion_tokens ? 'provider' : 'estimate'
+      };
+      effective.total_tokens = effective.prompt_tokens + effective.completion_tokens;
+      return { provider, estimate, effective, context: call.context_limit ? {
+        limit_tokens: call.context_limit,
+        used_input_tokens: effective.prompt_tokens,
+        available_input_tokens: Math.max(0, call.context_limit - effective.prompt_tokens)
+      } : null };
+    }
+
+    function sourceBadge(source) {
+      const value = source || 'estimate';
+      return `<span class="source-${escapeAttr(value)}">(${escapeHtml(value)})</span>`;
+    }
+
+    function providerTotal(trace) {
+      const totals = trace.token_totals || {};
+      const recorded = (totals.provider_prompt_tokens || 0) + (totals.provider_completion_tokens || 0);
+      const legacy = (trace.calls || []).reduce((sum, call) => sum + (call.usage?.prompt_tokens || 0) + (call.usage?.completion_tokens || 0), 0);
+      return number(recorded || legacy);
+    }
+
+    function estimateFallbackTotal(trace) {
+      const totals = trace.token_totals || {};
+      const recorded = (totals.estimated_fallback_prompt_tokens || 0) + (totals.estimated_fallback_completion_tokens || 0);
+      const legacy = (trace.calls || []).reduce((sum, call) => {
+        const prompt = call.usage?.prompt_tokens ? 0 : (call.estimated_input_tokens || 0);
+        const completion = call.usage?.completion_tokens ? 0 : (call.estimated_output_tokens || 0);
+        return sum + prompt + completion;
+      }, 0);
+      return number(recorded || legacy);
+    }
+
+    function scopeFor(call) { return call.action_type === 'agent_turn' ? 'interaction' : 'harness'; }
+    function number(value) { return Number(value || 0).toLocaleString(); }
 
     function jsonBlock(label, value) {
       const text = JSON.stringify(value ?? null, null, 2);
@@ -255,13 +390,24 @@ struct TraceFile {
     model_name: String,
     model: String,
     base_url: String,
+    token_totals: TraceTokenTotals,
     calls: Vec<TraceCall>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct TraceTokenTotals {
+    provider_prompt_tokens: usize,
+    provider_completion_tokens: usize,
+    estimated_fallback_prompt_tokens: usize,
+    estimated_fallback_completion_tokens: usize,
+    effective_total_tokens: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TraceCall {
     call_id: String,
     action_type: String,
+    action_scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -285,6 +431,8 @@ pub struct TraceCall {
     context_limit: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     token_breakdown: Option<TokenBreakdown>,
+    token_accounting: TraceTokenAccounting,
+    message_token_estimates: Vec<TraceMessageEstimate>,
     request: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     response: Option<Value>,
@@ -292,6 +440,46 @@ pub struct TraceCall {
     usage: Option<Usage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<TraceError>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TraceTokenAccounting {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<Usage>,
+    estimate: TraceUsageCounts,
+    effective: TraceEffectiveUsage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<TraceContextUsage>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+struct TraceUsageCounts {
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    total_tokens: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct TraceEffectiveUsage {
+    prompt_tokens: usize,
+    prompt_source: TokenSource,
+    completion_tokens: usize,
+    completion_source: TokenSource,
+    total_tokens: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct TraceContextUsage {
+    limit_tokens: usize,
+    used_input_tokens: usize,
+    available_input_tokens: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TraceMessageEstimate {
+    index: usize,
+    role: String,
+    estimated_tokens: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -329,6 +517,7 @@ pub struct PendingTraceCall {
     base_url: String,
     endpoint: String,
     request: Value,
+    message_token_estimates: Vec<TraceMessageEstimate>,
 }
 
 #[derive(Debug, Clone)]
@@ -339,13 +528,25 @@ pub struct TraceRecorder {
 
 impl TraceRecorder {
     pub fn interactive(sources: &ConfigSources, client: &OpenAiClient) -> anyhow::Result<Self> {
+        Self::session(sources, client, "interactive")
+    }
+
+    pub fn programmatic(sources: &ConfigSources, client: &OpenAiClient) -> anyhow::Result<Self> {
+        Self::session(sources, client, "prompt")
+    }
+
+    fn session(
+        sources: &ConfigSources,
+        client: &OpenAiClient,
+        run_kind: &'static str,
+    ) -> anyhow::Result<Self> {
         let session_id = unix_timestamp_millis().to_string();
         let path = sources
             .project_vyrn
             .join("debug")
             .join("sessions")
             .join(format!("{session_id}.json"));
-        Self::new(path, "interactive", session_id, None, client)
+        Self::new(path, run_kind, session_id, None, client)
     }
 
     pub fn eval_case(
@@ -378,6 +579,7 @@ impl TraceRecorder {
                 model_name: profile.name.clone(),
                 model: profile.model.clone(),
                 base_url: profile.base_url.clone(),
+                token_totals: TraceTokenTotals::default(),
                 calls: Vec::new(),
             },
         };
@@ -400,6 +602,17 @@ impl TraceRecorder {
         let mut finalized = request.clone();
         finalized.model = profile.model.clone();
         finalized.stream = stream;
+        let message_token_estimates = finalized
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| TraceMessageEstimate {
+                index,
+                role: message.role.clone(),
+                estimated_tokens: estimate_messages_breakdown(std::slice::from_ref(message))
+                    .total(),
+            })
+            .collect();
         PendingTraceCall {
             call_id: format!("call-{}", self.file.calls.len() + 1),
             metadata,
@@ -410,6 +623,7 @@ impl TraceRecorder {
             base_url: profile.base_url.clone(),
             endpoint: chat_completions_url(&profile.base_url),
             request: serde_json::to_value(finalized).unwrap_or(Value::Null),
+            message_token_estimates,
         }
     }
 
@@ -419,32 +633,82 @@ impl TraceRecorder {
         result: &Result<ChatCompletionResponse, LlmError>,
     ) -> anyhow::Result<()> {
         let ended_at_ms = unix_timestamp_millis();
-        let (response, usage, derived_output_tokens, error) = match result {
+        let (response, usage, estimated_response_tokens, error) = match result {
             Ok(response) => {
-                let derived_output_tokens = response
-                    .usage
-                    .map(|usage| usage.completion_tokens)
-                    .filter(|tokens| *tokens > 0)
-                    .or_else(|| {
-                        response
-                            .choices
-                            .first()
-                            .map(|choice| estimate_assistant_output_tokens(&choice.message))
-                    });
+                let estimated_response_tokens = response
+                    .choices
+                    .first()
+                    .map(|choice| estimate_assistant_output_tokens(&choice.message));
                 (
                     Some(serde_json::to_value(response).unwrap_or(Value::Null)),
                     response.usage,
-                    derived_output_tokens,
+                    estimated_response_tokens,
                     None,
                 )
             }
             Err(error) => (None, None, None, Some(trace_error(error))),
         };
         let metadata = pending.metadata;
-        let estimated_output_tokens = metadata.estimated_output_tokens.or(derived_output_tokens);
+        let estimated_input_tokens = metadata.estimated_input_tokens.unwrap_or_default();
+        let estimated_output_tokens = metadata
+            .estimated_output_tokens
+            .or(estimated_response_tokens)
+            .unwrap_or_default();
+        let provider_input = usage
+            .map(|usage| usage.prompt_tokens)
+            .filter(|tokens| *tokens > 0);
+        let provider_output = usage
+            .map(|usage| usage.completion_tokens)
+            .filter(|tokens| *tokens > 0);
+        let effective = TraceEffectiveUsage {
+            prompt_tokens: provider_input.unwrap_or(estimated_input_tokens),
+            prompt_source: if provider_input.is_some() {
+                TokenSource::Provider
+            } else {
+                TokenSource::Estimate
+            },
+            completion_tokens: provider_output.unwrap_or(estimated_output_tokens),
+            completion_source: if provider_output.is_some() {
+                TokenSource::Provider
+            } else {
+                TokenSource::Estimate
+            },
+            total_tokens: provider_input
+                .unwrap_or(estimated_input_tokens)
+                .saturating_add(provider_output.unwrap_or(estimated_output_tokens)),
+        };
+        let token_accounting = TraceTokenAccounting {
+            provider: usage,
+            estimate: TraceUsageCounts {
+                prompt_tokens: estimated_input_tokens,
+                completion_tokens: estimated_output_tokens,
+                total_tokens: estimated_input_tokens.saturating_add(estimated_output_tokens),
+            },
+            effective,
+            context: metadata
+                .context_limit
+                .map(|limit_tokens| TraceContextUsage {
+                    limit_tokens,
+                    used_input_tokens: effective.prompt_tokens,
+                    available_input_tokens: limit_tokens.saturating_sub(effective.prompt_tokens),
+                }),
+        };
+        if effective.prompt_source == TokenSource::Provider {
+            self.file.token_totals.provider_prompt_tokens += effective.prompt_tokens;
+        } else {
+            self.file.token_totals.estimated_fallback_prompt_tokens += effective.prompt_tokens;
+        }
+        if effective.completion_source == TokenSource::Provider {
+            self.file.token_totals.provider_completion_tokens += effective.completion_tokens;
+        } else {
+            self.file.token_totals.estimated_fallback_completion_tokens +=
+                effective.completion_tokens;
+        }
+        self.file.token_totals.effective_total_tokens += effective.total_tokens;
         self.file.calls.push(TraceCall {
             call_id: pending.call_id,
             action_type: metadata.action_type.to_string(),
+            action_scope: action_scope(metadata.action_type).to_string(),
             label: metadata.label,
             turn_index: metadata.turn_index,
             round_index: metadata.round_index,
@@ -457,9 +721,11 @@ impl TraceRecorder {
             base_url: pending.base_url,
             endpoint: pending.endpoint,
             estimated_input_tokens: metadata.estimated_input_tokens,
-            estimated_output_tokens,
+            estimated_output_tokens: Some(estimated_output_tokens),
             context_limit: metadata.context_limit,
             token_breakdown: metadata.token_breakdown,
+            token_accounting,
+            message_token_estimates: pending.message_token_estimates,
             request: pending.request,
             response,
             usage,
@@ -486,6 +752,13 @@ impl TraceRecorder {
 }
 
 pub fn write_viewer(sources: &ConfigSources) -> anyhow::Result<PathBuf> {
+    write_viewer_for_trace(sources, None)
+}
+
+pub fn write_viewer_for_trace(
+    sources: &ConfigSources,
+    trace_path: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
     let path = sources.project_vyrn.join("debug").join("viewer.html");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -497,9 +770,36 @@ pub fn write_viewer(sources: &ConfigSources) -> anyhow::Result<PathBuf> {
         .with_context(|| "failed to create eval runs directory".to_string())?;
     let hints = trace_hints(sources);
     let hints_json = serde_json::to_string(&hints)?;
-    let html = VIEWER_HTML.replace("__VYRN_TRACE_HINTS__", &hints_json);
+    let (embedded_trace, embedded_name) = if let Some(trace_path) = trace_path {
+        let raw = std::fs::read_to_string(trace_path)
+            .with_context(|| format!("failed to read {}", trace_path.display()))?;
+        let trace: Value = serde_json::from_str(&raw)
+            .with_context(|| format!("failed to parse {} as JSON", trace_path.display()))?;
+        (
+            script_safe_json(&trace)?,
+            serde_json::to_string(
+                &trace_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("embedded trace"),
+            )?,
+        )
+    } else {
+        ("null".to_string(), "\"embedded trace\"".to_string())
+    };
+    let html = VIEWER_HTML
+        .replace("__VYRN_TRACE_HINTS__", &hints_json)
+        .replace("__VYRN_EMBEDDED_TRACE__", &embedded_trace)
+        .replace("__VYRN_EMBEDDED_TRACE_NAME__", &embedded_name);
     std::fs::write(&path, html).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
+}
+
+fn script_safe_json(value: &Value) -> anyhow::Result<String> {
+    Ok(serde_json::to_string(value)?
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026"))
 }
 
 #[derive(Debug, Serialize)]
@@ -515,7 +815,7 @@ fn trace_hints(sources: &ConfigSources) -> TraceHints {
     let mut recent_files = Vec::new();
     collect_json_files(&session_dir, 1, &mut recent_files);
     collect_named_files(&eval_dir, "llm-trace.json", 6, &mut recent_files);
-    recent_files.sort_by(|left, right| right.0.cmp(&left.0));
+    recent_files.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     TraceHints {
         session_dir: session_dir.display().to_string(),
         eval_dir: eval_dir.display().to_string(),
@@ -622,6 +922,14 @@ fn trace_error(error: &LlmError) -> TraceError {
     }
 }
 
+fn action_scope(action_type: &str) -> &'static str {
+    if action_type == "agent_turn" {
+        "interaction"
+    } else {
+        "harness"
+    }
+}
+
 fn chat_completions_url(base_url: &str) -> String {
     format!("{}/chat/completions", base_url.trim_end_matches('/'))
 }
@@ -667,6 +975,8 @@ mod tests {
             tools: Vec::new(),
             tool_choice: None,
             stream: false,
+            stream_options: None,
+            max_tokens: None,
         };
 
         let pending = recorder.begin_call(
@@ -696,5 +1006,16 @@ mod tests {
         assert!(raw.contains(r#""stream": true"#), "{raw}");
         assert!(raw.contains(r#""action_type": "agent_turn""#), "{raw}");
         assert!(!raw.contains("secret"), "{raw}");
+        let trace: Value = serde_json::from_str(&raw).unwrap();
+        let call = &trace["calls"][0];
+        assert_eq!(trace["schema_version"], 2);
+        assert_eq!(call["action_scope"], "interaction");
+        assert_eq!(call["token_accounting"]["provider"]["total_tokens"], 10);
+        assert_eq!(call["token_accounting"]["estimate"]["prompt_tokens"], 12);
+        assert_eq!(
+            call["token_accounting"]["effective"]["prompt_source"],
+            "provider"
+        );
+        assert_eq!(call["message_token_estimates"][0]["role"], "user");
     }
 }
