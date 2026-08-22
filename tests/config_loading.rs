@@ -156,6 +156,37 @@ fn save_global_model_profile_creates_and_updates_models_file() {
     assert_eq!(local.api_key, "secret");
 }
 
+#[test]
+fn model_api_key_can_be_loaded_from_named_environment_variable() {
+    let temp = tempdir().unwrap();
+    let project = temp.path().join("project");
+    let global = temp.path().join("home/.vyrn");
+    std::fs::create_dir_all(project.join(".vyrn")).unwrap();
+    std::fs::write(
+        project.join(".vyrn/models.toml"),
+        r#"
+[models.behavior]
+base_url = "https://example.test/v1"
+model = "small"
+api_key_env = "VYRN_TEST_MODEL_API_KEY_7319"
+"#,
+    )
+    .unwrap();
+    unsafe {
+        std::env::set_var("VYRN_TEST_MODEL_API_KEY_7319", "environment-secret");
+    }
+
+    let models = load_model_profiles(&sources(project, global)).unwrap();
+
+    unsafe {
+        std::env::remove_var("VYRN_TEST_MODEL_API_KEY_7319");
+    }
+    assert_eq!(
+        models.get("behavior").unwrap().api_key,
+        "environment-secret"
+    );
+}
+
 fn sources(project_root: PathBuf, global_vyrn: PathBuf) -> ConfigSources {
     let project_vyrn = project_root.join(".vyrn");
     let project_agents = project_root.join(".agents");

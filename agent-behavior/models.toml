@@ -1,0 +1,6 @@
+# Live behavioral-test model profiles. Add a profile here and its name to
+# models.list to run every behavioral case against it.
+[models."glm-5.2"]
+base_url = "https://api.z.ai/api/paas/v4/"
+model = "glm-5.2"
+api_key_env = "ZAI_API_KEY"

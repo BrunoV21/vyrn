@@ -35,6 +35,8 @@ pub enum ConfigError {
     MissingModel(String),
     #[error("default model '{0}' was not found")]
     MissingDefaultModel(String),
+    #[error("model profile '{profile}' requires environment variable '{variable}'")]
+    MissingModelApiKeyEnv { profile: String, variable: String },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]

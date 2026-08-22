@@ -8,7 +8,7 @@ pub struct ModelProfile {
     pub name: String,
     pub base_url: String,
     pub model: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub api_key: String,
 }
 
@@ -29,6 +29,8 @@ struct ModelProfileFile {
     model: String,
     #[serde(default)]
     api_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    api_key_env: Option<String>,
 }
 
 impl ModelRegistry {
@@ -95,13 +97,26 @@ impl ModelRegistry {
         })?;
 
         for (name, profile) in parsed.models {
+            let api_key = if !profile.api_key.is_empty() {
+                profile.api_key
+            } else if let Some(variable) = profile
+                .api_key_env
+                .filter(|variable| !variable.trim().is_empty())
+            {
+                std::env::var(&variable).map_err(|_| ConfigError::MissingModelApiKeyEnv {
+                    profile: name.clone(),
+                    variable,
+                })?
+            } else {
+                String::new()
+            };
             self.profiles.insert(
                 name.clone(),
                 ModelProfile {
                     name,
                     base_url: profile.base_url,
                     model: profile.model,
-                    api_key: profile.api_key,
+                    api_key,
                 },
             );
         }
@@ -135,6 +150,7 @@ pub fn save_global_model_profile(
             base_url: profile.base_url.clone(),
             model: profile.model.clone(),
             api_key: profile.api_key.clone(),
+            api_key_env: None,
         },
     );
 

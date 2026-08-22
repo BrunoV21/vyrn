@@ -1,0 +1,74 @@
+{
+  "name": "agent-behavior",
+  "cases": [
+    {
+      "id": "conversation-memory",
+      "description": "The rolling session memory must preserve an exact fact across user turns.",
+      "prompt": "Remember this exact phrase for my next message: VYRN_MEMORY_VIOLET_48291. Reply only ACK.",
+      "follow_up_prompts": [
+        "Reply with the exact phrase I asked you to remember, and nothing else."
+      ],
+      "max_turns": 4,
+      "assertions": [
+        {
+          "type": "assistant_contains",
+          "value": "VYRN_MEMORY_VIOLET_48291"
+        },
+        {
+          "type": "tool_not_called",
+          "name": "read_file"
+        }
+      ]
+    },
+    {
+      "id": "tool-result-memory",
+      "description": "A later user turn must remember a fact obtained through a previous turn's tools and scratchpad.",
+      "prompt": "Use read_file to read memory-fixture.txt. Remember its exact marker for my next message, then reply only READY.",
+      "follow_up_prompts": [
+        "Without reading the file again, reply with the exact marker and nothing else."
+      ],
+      "max_turns": 8,
+      "assertions": [
+        {
+          "type": "assistant_contains",
+          "value": "VYRN_TOOL_MEMORY_VIOLET_7319"
+        },
+        {
+          "type": "tool_called",
+          "name": "read_file"
+        },
+        {
+          "type": "judge",
+          "prompt": "PASS only if the assistant used the remembered marker from the earlier tool-backed turn and the final answer follows the user's requested concise format."
+        }
+      ]
+    },
+    {
+      "id": "live-steering",
+      "description": "Human steering must supersede a proposed action before the next agent decision.",
+      "prompt": "Use write_file to create obsolete.txt containing SHOULD_NOT_EXIST, then report completion.",
+      "steering": [
+        {
+          "turn": 0,
+          "after_round": 0,
+          "message": "Stop. Do not create any file. Reply with exactly VYRN_STEERING_APPLIED."
+        }
+      ],
+      "max_turns": 4,
+      "assertions": [
+        {
+          "type": "assistant_contains",
+          "value": "VYRN_STEERING_APPLIED"
+        },
+        {
+          "type": "tool_not_called",
+          "name": "write_file"
+        },
+        {
+          "type": "file_not_exists",
+          "path": "obsolete.txt"
+        }
+      ]
+    }
+  ]
+}

@@ -7,8 +7,9 @@ use crate::agent::tokens::{
 };
 use crate::agent::transcript::{Exchange, truncate};
 use crate::agent::turn::{
-    TurnScratchpad, build_fitted_turn_scratchpad_update_messages, build_turn_messages,
-    prepare_next_turn_context, turn_scratchpad_update_source,
+    TurnScratchpad, apply_live_steering_to_tool_batch,
+    build_fitted_turn_scratchpad_update_messages, build_turn_messages, prepare_next_turn_context,
+    turn_scratchpad_update_source,
 };
 use crate::cli::EvalArgs;
 use crate::config::{ConfigSources, EffectiveConfig, ModelProfile, ModelRegistry};
@@ -31,6 +32,7 @@ use tokio::time::timeout;
 
 const DEFAULT_MAX_TOOL_ROUNDS: usize = 64;
 const ASSERTION_COMMAND_TIMEOUT_SECONDS: u64 = 120;
+const JUDGE_MAX_TOKENS: usize = 1024;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -50,11 +52,26 @@ pub struct EvalCase {
     pub description: Option<String>,
     pub prompt: String,
     #[serde(default)]
+    pub follow_up_prompts: Vec<String>,
+    #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub max_turns: Option<usize>,
     #[serde(default)]
+    pub steering: Vec<EvalSteering>,
+    #[serde(default)]
     pub assertions: Vec<EvalAssertion>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvalSteering {
+    /// Zero-based conversation turn receiving the steering message.
+    #[serde(default)]
+    pub turn: usize,
+    /// Zero-based agent round after which the message is injected.
+    pub after_round: usize,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -77,6 +94,9 @@ pub enum EvalAssertion {
         name: String,
     },
     FileExists {
+        path: PathBuf,
+    },
+    FileNotExists {
         path: PathBuf,
     },
     FileContains {
@@ -124,6 +144,7 @@ struct EvalTrace {
     passed: bool,
     duration_ms: u128,
     final_assistant: String,
+    turns: Vec<EvalTurnTrace>,
     requests: Vec<EvalRequestTrace>,
     events: Vec<EvalTraceEvent>,
     tool_calls: Vec<ToolCall>,
@@ -135,7 +156,14 @@ struct EvalTrace {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct EvalTurnTrace {
+    prompt: String,
+    final_assistant: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct EvalRequestTrace {
+    turn: usize,
     label: String,
     messages: Vec<ChatMessage>,
     tool_count: usize,
@@ -149,25 +177,35 @@ struct EvalRequestTrace {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum EvalTraceEvent {
     AssistantDelta {
+        turn: usize,
         round: usize,
         text: String,
     },
     ToolStarted {
+        turn: usize,
         round: usize,
         name: String,
     },
     ToolOk {
+        turn: usize,
         round: usize,
         result: ToolResult,
     },
     ToolError {
+        turn: usize,
         round: usize,
         name: String,
         error: String,
     },
     Scratchpad {
+        turn: usize,
         round: usize,
         summary: String,
+    },
+    Steering {
+        turn: usize,
+        after_round: usize,
+        message: String,
     },
 }
 
@@ -322,6 +360,34 @@ fn validate_suite(suite: &EvalSuite) -> anyhow::Result<()> {
         if case.prompt.trim().is_empty() {
             anyhow::bail!("eval case '{}' prompt cannot be empty", case.id);
         }
+        if case
+            .follow_up_prompts
+            .iter()
+            .any(|prompt| prompt.trim().is_empty())
+        {
+            anyhow::bail!("eval case '{}' follow-up prompts cannot be empty", case.id);
+        }
+        let mut steering_points = BTreeSet::new();
+        for steering in &case.steering {
+            if steering.message.trim().is_empty() {
+                anyhow::bail!("eval case '{}' steering message cannot be empty", case.id);
+            }
+            if steering.turn > case.follow_up_prompts.len() {
+                anyhow::bail!(
+                    "eval case '{}' steering turn {} does not exist",
+                    case.id,
+                    steering.turn
+                );
+            }
+            if !steering_points.insert((steering.turn, steering.after_round)) {
+                anyhow::bail!(
+                    "eval case '{}' has duplicate steering at turn {} round {}",
+                    case.id,
+                    steering.turn,
+                    steering.after_round
+                );
+            }
+        }
         if case.assertions.is_empty() {
             anyhow::bail!(
                 "eval case '{}' must include at least one assertion",
@@ -413,31 +479,80 @@ fn render_transcript(trace: &EvalTrace) -> String {
         text.push_str(description);
         text.push_str("\n\n");
     }
-    text.push_str("## Prompt\n\n");
-    text.push_str(&trace.case.prompt);
+    text.push_str("## Conversation\n\n");
+    for (index, turn) in trace.turns.iter().enumerate() {
+        text.push_str(&format!(
+            "### Turn {} user\n\n{}\n\n### Turn {} assistant\n\n{}\n\n",
+            index + 1,
+            turn.prompt,
+            index + 1,
+            turn.final_assistant
+        ));
+    }
     text.push_str("\n\n## Events\n\n");
     for event in &trace.events {
         match event {
-            EvalTraceEvent::AssistantDelta { round, text: delta } => {
-                text.push_str(&format!("- round {round} assistant: {}\n", delta.trim()));
-            }
-            EvalTraceEvent::ToolStarted { round, name } => {
-                text.push_str(&format!("- round {round} tool started: `{name}`\n"));
-            }
-            EvalTraceEvent::ToolOk { round, result } => {
+            EvalTraceEvent::AssistantDelta {
+                turn,
+                round,
+                text: delta,
+            } => {
                 text.push_str(&format!(
-                    "- round {round} tool ok: `{}`\n\n```text\n{}\n```\n",
+                    "- turn {} round {round} assistant: {}\n",
+                    turn + 1,
+                    delta.trim()
+                ));
+            }
+            EvalTraceEvent::ToolStarted { turn, round, name } => {
+                text.push_str(&format!(
+                    "- turn {} round {round} tool started: `{name}`\n",
+                    turn + 1
+                ));
+            }
+            EvalTraceEvent::ToolOk {
+                turn,
+                round,
+                result,
+            } => {
+                text.push_str(&format!(
+                    "- turn {} round {round} tool ok: `{}`\n\n```text\n{}\n```\n",
+                    turn + 1,
                     result.name,
                     truncate(&result.content, 2000)
                 ));
             }
-            EvalTraceEvent::ToolError { round, name, error } => {
-                text.push_str(&format!("- round {round} tool error: `{name}` {error}\n"));
-            }
-            EvalTraceEvent::Scratchpad { round, summary } => {
+            EvalTraceEvent::ToolError {
+                turn,
+                round,
+                name,
+                error,
+            } => {
                 text.push_str(&format!(
-                    "- round {round} scratchpad:\n\n{}\n",
+                    "- turn {} round {round} tool error: `{name}` {error}\n",
+                    turn + 1
+                ));
+            }
+            EvalTraceEvent::Scratchpad {
+                turn,
+                round,
+                summary,
+            } => {
+                text.push_str(&format!(
+                    "- turn {} round {round} scratchpad:\n\n{}\n",
+                    turn + 1,
                     summary.trim()
+                ));
+            }
+            EvalTraceEvent::Steering {
+                turn,
+                after_round,
+                message,
+            } => {
+                text.push_str(&format!(
+                    "- turn {} round {} live steering: {}\n",
+                    turn + 1,
+                    after_round,
+                    message
                 ));
             }
         }
@@ -545,6 +660,14 @@ async fn evaluate_assertion(
                 message: format!("file '{}' exists", path.display()),
             }
         }
+        EvalAssertion::FileNotExists { path } => {
+            let passed = !path.exists();
+            AssertionOutcome {
+                assertion: assertion.clone(),
+                passed,
+                message: format!("file '{}' does not exist", path.display()),
+            }
+        }
         EvalAssertion::FileContains { path, value } => {
             let passed = std::fs::read_to_string(path)
                 .map(|content| content.contains(value))
@@ -623,8 +746,20 @@ async fn judge_assertion(
             "You judge a terminal agent eval. Return PASS or FAIL on the first line, then a concise reason.",
         ),
         ChatMessage::user(format!(
-            "Assertion:\n{prompt}\n\nUser prompt:\n{}\n\nFinal assistant:\n{}\n\nTool calls:\n{}",
-            trace.case.prompt,
+            "Assertion:\n{prompt}\n\nConversation:\n{}\n\nFinal assistant:\n{}\n\nTool calls:\n{}",
+            trace
+                .turns
+                .iter()
+                .enumerate()
+                .map(|(index, turn)| format!(
+                    "turn {} user: {}\nturn {} assistant: {}",
+                    index + 1,
+                    turn.prompt,
+                    index + 1,
+                    turn.final_assistant
+                ))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
             trace.final_assistant,
             serde_json::to_string(&trace.tool_calls).unwrap_or_default()
         )),
@@ -637,7 +772,9 @@ async fn judge_assertion(
         tool_choice: None,
         stream: false,
         stream_options: None,
-        max_tokens: Some(256),
+        // Reasoning models can consume several hundred hidden completion tokens
+        // before emitting the short PASS/FAIL verdict.
+        max_tokens: Some(JUDGE_MAX_TOKENS),
     };
     let pending_trace = llm_trace.as_ref().map(|trace_recorder| {
         trace_recorder.begin_call(
@@ -727,6 +864,7 @@ impl EvalAgentRunner {
             passed: false,
             duration_ms: 0,
             final_assistant: String::new(),
+            turns: Vec::new(),
             requests: Vec::new(),
             events: Vec::new(),
             tool_calls: Vec::new(),
@@ -745,9 +883,15 @@ impl EvalAgentRunner {
             self.config.context.max_tokens
         ));
 
-        let result = self.run_prompt(&case, &mut trace).await;
-        if let Err(error) = result {
-            trace.error = Some(error.to_string());
+        let prompts = std::iter::once(case.prompt.as_str())
+            .chain(case.follow_up_prompts.iter().map(String::as_str))
+            .collect::<Vec<_>>();
+        for prompt in prompts {
+            let result = self.run_prompt(&case, prompt, &mut trace).await;
+            if let Err(error) = result {
+                trace.error = Some(error.to_string());
+                break;
+            }
         }
         trace.duration_ms = started.elapsed().as_millis();
         trace.stats = self.stats.clone();
@@ -755,8 +899,15 @@ impl EvalAgentRunner {
         trace
     }
 
-    async fn run_prompt(&mut self, case: &EvalCase, trace: &mut EvalTrace) -> Result<(), LlmError> {
-        let text_images = vision::attachments_from_text(&case.prompt)
+    async fn run_prompt(
+        &mut self,
+        case: &EvalCase,
+        prompt_text: &str,
+        trace: &mut EvalTrace,
+    ) -> Result<(), LlmError> {
+        self.context.begin_turn(prompt_text);
+        let initial_memory = self.context.prompt_memory();
+        let text_images = vision::attachments_from_text(prompt_text)
             .await
             .map_err(|error| LlmError::Input(error.to_string()))?;
         let mut images = Vec::new();
@@ -767,13 +918,13 @@ impl EvalAgentRunner {
         let initial_prompt = build_agent_prompt(
             &self.tools,
             &self.manifest,
-            self.context.summary(),
-            &case.prompt,
+            initial_memory.as_deref(),
+            prompt_text,
             &images,
         );
         self.debug_log(format!(
             "turn_start user_tokens={} images={} initial_prompt_tokens={} raw_history_tokens={} has_summary={}",
-            estimate_text_tokens(&case.prompt),
+            estimate_text_tokens(prompt_text),
             images.len(),
             initial_prompt.estimated_tokens.tokens,
             self.context.raw_history_tokens(),
@@ -817,11 +968,12 @@ impl EvalAgentRunner {
             );
         }
 
+        let prompt_memory = self.context.prompt_memory();
         let prompt = build_agent_prompt(
             &self.tools,
             &self.manifest,
-            self.context.summary(),
-            &case.prompt,
+            prompt_memory.as_deref(),
+            prompt_text,
             &images,
         );
         usage.context_tokens = prompt.estimated_tokens.tokens;
@@ -831,6 +983,9 @@ impl EvalAgentRunner {
         let mut last_request_messages =
             build_turn_messages(&base_messages, &scratchpad, &current_tool_batch);
         let mut assistant_text = String::new();
+        let turn_index = self.stats.turns.len();
+        let first_tool_call = trace.tool_calls.len();
+        let first_tool_result = trace.tool_results.len();
         let max_rounds = case.max_turns.unwrap_or(DEFAULT_MAX_TOOL_ROUNDS).max(1);
         let mut hit_tool_round_limit = false;
 
@@ -899,12 +1054,15 @@ impl EvalAgentRunner {
                 .stream_chat(request, |event| match event {
                     StreamEvent::TextDelta(delta) => {
                         response_text.push_str(&delta);
-                        trace
-                            .events
-                            .push(EvalTraceEvent::AssistantDelta { round, text: delta });
+                        trace.events.push(EvalTraceEvent::AssistantDelta {
+                            turn: turn_index,
+                            round,
+                            text: delta,
+                        });
                     }
                     StreamEvent::ToolCallDone(call) => {
                         trace.events.push(EvalTraceEvent::ToolStarted {
+                            turn: turn_index,
                             round,
                             name: call.function.name,
                         });
@@ -962,6 +1120,7 @@ impl EvalAgentRunner {
 
             let tool_calls = message.tool_calls.clone().unwrap_or_default();
             trace.requests.push(EvalRequestTrace {
+                turn: turn_index,
                 label: format!("agent-{round}"),
                 messages,
                 tool_count: tool_schemas.len(),
@@ -977,6 +1136,29 @@ impl EvalAgentRunner {
                 tool_calls.len(),
                 message.content.is_some()
             ));
+            if let Some(steering) = case
+                .steering
+                .iter()
+                .find(|steering| steering.turn == turn_index && steering.after_round == round)
+            {
+                self.debug_log(format!(
+                    "eval_live_steering turn={} after_round={round}",
+                    turn_index
+                ));
+                trace.events.push(EvalTraceEvent::Steering {
+                    turn: turn_index,
+                    after_round: round,
+                    message: steering.message.clone(),
+                });
+                current_tool_batch = vec![message.clone()];
+                apply_live_steering_to_tool_batch(
+                    &mut current_tool_batch,
+                    &tool_calls,
+                    &steering.message,
+                );
+                assistant_text.clear();
+                continue;
+            }
             if tool_calls.is_empty() {
                 break;
             }
@@ -994,6 +1176,7 @@ impl EvalAgentRunner {
                         );
                         current_tool_batch.push(tool_message);
                         trace.events.push(EvalTraceEvent::ToolOk {
+                            turn: turn_index,
                             round,
                             result: tool_result.clone(),
                         });
@@ -1019,6 +1202,7 @@ impl EvalAgentRunner {
                         let tool_message = ChatMessage::tool(call.id.clone(), content);
                         current_tool_batch.push(tool_message);
                         trace.events.push(EvalTraceEvent::ToolError {
+                            turn: turn_index,
                             round,
                             name: call.function.name.clone(),
                             error: error.to_string(),
@@ -1047,6 +1231,7 @@ impl EvalAgentRunner {
             scratchpad = next_context.scratchpad;
             current_tool_batch = next_context.tool_batch;
             trace.events.push(EvalTraceEvent::Scratchpad {
+                turn: turn_index,
                 round,
                 summary: scratchpad.summary.clone(),
             });
@@ -1068,10 +1253,11 @@ impl EvalAgentRunner {
         }
 
         self.context.set_previous_exchange(Exchange {
-            user_input: exchange_user_input(&case.prompt, images.len()),
+            user_input: exchange_user_input(prompt_text, images.len()),
             assistant_text: assistant_text.clone(),
-            tool_calls: trace.tool_calls.clone(),
-            tool_results: trace.tool_results.clone(),
+            turn_scratchpad: scratchpad.summary.clone(),
+            tool_calls: trace.tool_calls[first_tool_call..].to_vec(),
+            tool_results: trace.tool_results[first_tool_result..].to_vec(),
         });
         usage.context_tokens =
             estimate_chat_request_breakdown(&last_request_messages, &self.tools.schemas()).total();
@@ -1088,7 +1274,11 @@ impl EvalAgentRunner {
                 self.stats.session_saved
             ));
         }
-        trace.final_assistant = assistant_text;
+        trace.final_assistant = assistant_text.clone();
+        trace.turns.push(EvalTurnTrace {
+            prompt: prompt_text.to_string(),
+            final_assistant: assistant_text,
+        });
         if hit_tool_round_limit {
             return Err(LlmError::ToolRoundLimit { rounds: max_rounds });
         }
@@ -1268,8 +1458,10 @@ mod tests {
                     id: "same".to_string(),
                     description: None,
                     prompt: "one".to_string(),
+                    follow_up_prompts: Vec::new(),
                     model: None,
                     max_turns: None,
+                    steering: Vec::new(),
                     assertions: vec![EvalAssertion::AssistantContains {
                         value: "ok".to_string(),
                     }],
@@ -1278,8 +1470,10 @@ mod tests {
                     id: "same".to_string(),
                     description: None,
                     prompt: "two".to_string(),
+                    follow_up_prompts: Vec::new(),
                     model: None,
                     max_turns: None,
+                    steering: Vec::new(),
                     assertions: vec![EvalAssertion::AssistantContains {
                         value: "ok".to_string(),
                     }],
@@ -1370,8 +1564,10 @@ mod tests {
                 id: "sample".to_string(),
                 description: None,
                 prompt: "sample".to_string(),
+                follow_up_prompts: Vec::new(),
                 model: None,
                 max_turns: None,
+                steering: Vec::new(),
                 assertions: Vec::new(),
             },
             model: ModelProfile {
@@ -1383,6 +1579,10 @@ mod tests {
             passed: false,
             duration_ms: 0,
             final_assistant: final_assistant.to_string(),
+            turns: vec![EvalTurnTrace {
+                prompt: "sample".to_string(),
+                final_assistant: final_assistant.to_string(),
+            }],
             requests: Vec::new(),
             events: Vec::new(),
             tool_calls,

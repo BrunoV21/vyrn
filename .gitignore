@@ -13,5 +13,6 @@ docs/official/.vitepress/dist/
 .vyrn/models.toml
 .vyrn/state.toml
 .vyrn/eval-runs/
+.vyrn/behavior-runs/
 .vyrn/debug/
 .vyrn7*

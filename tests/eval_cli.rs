@@ -96,6 +96,7 @@ api_key = ""
     let trace = std::fs::read_to_string(output_dir.join("read-fixture/trace.json")).unwrap();
     assert!(trace.contains("\"name\": \"read_file\""), "{trace}");
     assert!(trace.contains("hello from eval"), "{trace}");
+    assert!(!trace.contains("\"api_key\""), "{trace}");
     let transcript =
         std::fs::read_to_string(output_dir.join("read-fixture/transcript.md")).unwrap();
     assert!(transcript.contains("Final Assistant"), "{transcript}");
@@ -463,6 +464,179 @@ api_key = ""
     let debug_log = std::fs::read_to_string(output_dir.join("many-large-tools/debug.log")).unwrap();
     assert_eq!(debug_log.matches("tool_chain_prepare").count(), 1);
     assert!(debug_log.contains("tools=3"), "{debug_log}");
+}
+
+#[test]
+fn eval_runs_multi_turn_memory_case_with_exact_recent_anchor() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let server_bodies = Arc::clone(&bodies);
+    let server = thread::spawn(move || {
+        for request_index in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let body = read_http_body(&mut stream);
+            server_bodies.lock().unwrap().push(body);
+            match request_index {
+                0 => write_sse(
+                    &mut stream,
+                    r#"data: {"choices":[{"delta":{"content":"ACK"}}]}"#,
+                ),
+                1 => write_json(
+                    &mut stream,
+                    r#"{"choices":[{"message":{"role":"assistant","content":"The user asked vyrn to remember VYRN_MEMORY_VIOLET_48291."}}]}"#,
+                ),
+                _ => write_sse(
+                    &mut stream,
+                    r#"data: {"choices":[{"delta":{"content":"VYRN_MEMORY_VIOLET_48291"}}]}"#,
+                ),
+            }
+        }
+    });
+
+    let temp = tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".vyrn")).unwrap();
+    std::fs::create_dir_all(temp.path().join("evals")).unwrap();
+    std::fs::write(
+        temp.path().join(".vyrn/models.toml"),
+        format!(
+            r#"[models.local]
+base_url = "http://{addr}/v1"
+model = "fake-small"
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("evals/memory.json"),
+        r#"{
+  "name": "memory",
+  "cases": [{
+    "id": "remember",
+    "prompt": "Remember VYRN_MEMORY_VIOLET_48291. Reply ACK.",
+    "follow_up_prompts": ["What was the exact phrase?"],
+    "assertions": [
+      { "type": "assistant_contains", "value": "VYRN_MEMORY_VIOLET_48291" }
+    ]
+  }]
+}"#,
+    )
+    .unwrap();
+
+    let output_dir = temp.path().join("traces");
+    let output = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .arg("eval")
+        .arg("evals/memory.json")
+        .arg("--output")
+        .arg(&output_dir)
+        .output()
+        .unwrap();
+    server.join().unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 3);
+    assert!(
+        bodies[2].contains("session goal (verbatim)"),
+        "{}",
+        bodies[2]
+    );
+    assert!(
+        bodies[2].contains("most recent exchange (verbatim anchor)"),
+        "{}",
+        bodies[2]
+    );
+    assert!(
+        bodies[2].contains("VYRN_MEMORY_VIOLET_48291"),
+        "{}",
+        bodies[2]
+    );
+    let trace = std::fs::read_to_string(output_dir.join("remember/trace.json")).unwrap();
+    assert!(trace.contains("\"turns\""), "{trace}");
+    assert!(trace.contains("What was the exact phrase?"), "{trace}");
+}
+
+#[test]
+fn eval_live_steering_prevents_proposed_tool_execution() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut first, _) = listener.accept().unwrap();
+        let _ = read_http_body(&mut first);
+        write_sse(
+            &mut first,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_write","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"obsolete.txt\",\"content\":\"SHOULD_NOT_EXIST\"}"}}]}}]}"#,
+        );
+
+        let (mut second, _) = listener.accept().unwrap();
+        let body = read_http_body(&mut second);
+        assert!(body.contains("live steering from the human"), "{body}");
+        assert!(body.contains("Do not create any file"), "{body}");
+        write_sse(
+            &mut second,
+            r#"data: {"choices":[{"delta":{"content":"VYRN_STEERING_APPLIED"}}]}"#,
+        );
+    });
+
+    let temp = tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".vyrn")).unwrap();
+    std::fs::create_dir_all(temp.path().join("evals")).unwrap();
+    std::fs::write(
+        temp.path().join(".vyrn/models.toml"),
+        format!(
+            r#"[models.local]
+base_url = "http://{addr}/v1"
+model = "fake-small"
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("evals/steering.json"),
+        r#"{
+  "name": "steering",
+  "cases": [{
+    "id": "redirect",
+    "prompt": "Create obsolete.txt.",
+    "steering": [{
+      "after_round": 0,
+      "message": "Do not create any file. Reply VYRN_STEERING_APPLIED."
+    }],
+    "assertions": [
+      { "type": "assistant_contains", "value": "VYRN_STEERING_APPLIED" },
+      { "type": "tool_not_called", "name": "write_file" },
+      { "type": "file_not_exists", "path": "obsolete.txt" }
+    ]
+  }]
+}"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .arg("eval")
+        .arg("evals/steering.json")
+        .arg("--output")
+        .arg(temp.path().join("traces"))
+        .output()
+        .unwrap();
+    server.join().unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!temp.path().join("obsolete.txt").exists());
 }
 
 fn read_http_body(stream: &mut TcpStream) -> String {
