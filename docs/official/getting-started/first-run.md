@@ -14,6 +14,15 @@ model = "llama3.2"
 api_key = ""
 ```
 
+Or scaffold a project-local `.vyrn/` directory with starter config files:
+
+```bash
+cargo run -- init
+```
+
+The command creates `.vyrn/config.toml`, `.vyrn/models.toml`, and
+`.vyrn/skills/` if they do not already exist.
+
 Start with model selection:
 
 ```bash
@@ -21,6 +30,8 @@ cargo run -- --models
 ```
 
 Use Up/Down and Enter to choose a profile. `--model` is accepted as an alias.
+If no model profiles exist yet, vyrn prompts for a profile name, base URL, model
+ID, and optional API key, then saves the profile to `~/.vyrn/models.toml`.
 
 If `vyrn` is installed from Cargo later, use:
 
@@ -60,11 +71,15 @@ You can attach multiple images in one message. Supported file types are `png`, `
 Useful local commands inside the session:
 
 ```text
+/help       list commands and controls
 /models     switch model profile
-/stats      show token usage
+/stats      show provider usage, estimates, and savings
+/context    show context used and available
+/scratchpad show the latest turn scratchpad
 /manifest   print compact machine manifest
 /refresh    rescan manifest
 /skills     list discovered skill sources and paths
+/debug      show trace status and path
 /clear      reset session context and clear the terminal
 /exit       close the session
 ```

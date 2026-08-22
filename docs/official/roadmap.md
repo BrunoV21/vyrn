@@ -114,6 +114,14 @@ Future trace improvements may add richer context-decision reports, summary
 revision diffs, activated skill metadata, memory reads, and tool result size
 histograms while keeping the normal UI compact.
 
+### Token usage audit
+
+Persist an inspectable local audit of tokens consumed. Store per-request and
+cumulative token usage in vyrn state or another local file, including prompt,
+completion, and total token counts when the configured endpoint reports them.
+Keep the audit local-first and useful without requiring raw prompt or response
+content.
+
 ## Non-goals for v1
 
 - GUI or web interface.

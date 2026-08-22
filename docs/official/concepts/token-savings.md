@@ -4,7 +4,9 @@ Token savings is a product feature, not just a diagnostic metric.
 
 ## Accounting
 
-vyrn tracks token usage across each model call:
+vyrn tracks token usage across each model call. Provider-reported prompt and
+completion counts are authoritative when present; either side independently
+falls back to a labeled estimate when the provider omits it:
 
 ```text
 tokens_spent          = request input tokens plus known or estimated output tokens
@@ -27,6 +29,11 @@ system prompt text, rolling summaries, summary input, summary output, user
 requests, images, skill metadata and loaded skill files, tool schemas, tool call
 input, tool call output, assistant context, assistant output, and message
 overhead.
+
+Streaming calls request provider usage with OpenAI-compatible
+`stream_options.include_usage`. Context footprint, per-message values, raw
+history, `would_be`, and savings remain estimates because providers do not
+report those counterfactual or message-level values.
 
 ## UI contract
 

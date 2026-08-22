@@ -2,22 +2,27 @@
 
 Slash commands are available inside an active interactive session.
 
-In a real terminal, type `/` to show the active slash-command completion next to
-the text you have typed. Press `Tab` to accept the shown command without running
-it. Press `Enter` to run the accepted command, or to run the shown completion
-when the typed prefix is incomplete.
+In a real terminal, type `/`, press `Ctrl+O`, or press `F1` to open the command
+palette. Continue typing to filter it, use Up/Down to select, press `Tab` to
+accept without running, or press `Enter` to run the selected completion.
+
+## `/help`
+
+List every in-session command and the core keyboard controls.
 
 ## `/models`
 
 Switch the active model profile without leaving the session. Use Up/Down and
-Enter to choose a configured profile.
+Enter to choose a configured profile, or select `configure new model` to add a
+profile through the same setup flow used when vyrn starts without any configured
+models.
 
 ```text
 /models
 ```
 
-The selected model is stored as the last selected model for future sessions. `/model`
-is kept as an alias.
+The selected model is stored as the last selected model for future sessions. New
+profiles are saved to `~/.vyrn/models.toml`. `/model` is kept as an alias.
 
 ## `/stats`
 
@@ -34,8 +39,24 @@ input, summary output, user requests, images, skill metadata and loaded skill
 files, tool schemas, tool call input, tool call output, assistant context,
 assistant output, and message overhead.
 
+Provider-reported prompt and completion counts are used whenever available.
+Fallback counts, retained context, the raw-history counterfactual, and savings
+are labeled as estimates.
+
 In verbose mode, `/stats` also includes per-call accounting and per-call
 contributors for each turn.
+
+## `/context`
+
+Show estimated context used and still available, rolling-summary and raw-history
+size, provider-reported session tokens, fallback estimates, and estimated
+history savings.
+
+## `/scratchpad`
+
+Show the latest compact scratchpad produced while tools were running in the last
+turn. This exposes the task facts and outcomes vyrn retained as old tool batches
+were ingested.
 
 ## `/manifest`
 
@@ -67,6 +88,11 @@ List discovered skills with their source and `SKILL.md` path.
 
 Use this to see whether a skill came from project `.vyrn`, global `~/.vyrn`, or
 project `.agents`, and which file the agent can read when activating it.
+
+## `/debug`
+
+Show whether structured tracing is enabled. When active, this prints the exact
+`.vyrn/debug/sessions/<session-id>.json` path.
 
 ## `/clear`
 

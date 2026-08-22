@@ -7,17 +7,20 @@ vyrn has a deliberately small command surface. The primary interface is the inte
 | Command | Description |
 |---|---|
 | `vyrn` | Start an interactive session with the default model. |
+| `vyrn -p "inspect src"` | Run one prompt non-interactively, then exit. |
+| `vyrn init` | Create a local `.vyrn/` scaffold with starter config files. |
 | `vyrn --models` | Select a configured model profile before starting. `--model` is an alias. |
 | `vyrn --context 2048` | Override the context budget for this session. |
 | `vyrn --verbose` | Show full token counts and raw summary information. |
 | `vyrn --debug` | Show provider URLs, network details, response bodies on errors, and write LLM trace JSON. |
-| `vyrn debug-viewer` | Write a local static HTML viewer for debug trace JSON. |
+| `vyrn debug-viewer [trace.json]` | Write the local viewer, optionally embedding one trace. |
 | `vyrn eval evals/basic.json` | Run JSON-defined live agent evals and write traces. |
 
 From a source checkout, prefix commands with `cargo run --`, for example:
 
 ```bash
 cargo run -- --models
+cargo run -- init
 ```
 
 ## In-session slash commands
@@ -26,11 +29,15 @@ Slash commands operate inside an active `vyrn` session.
 
 | Command | Description |
 |---|---|
+| `/help` | List commands and keyboard controls. |
 | `/models` | Switch model profile mid-session. |
-| `/stats` | Show full token usage for the session. |
+| `/stats` | Show provider usage, labeled estimates, and savings. |
+| `/context` | Show context used, available, and retained. |
+| `/scratchpad` | Show the latest evolving turn scratchpad. |
 | `/manifest` | Print the current machine manifest. |
 | `/refresh` | Trigger `refresh_manifest` manually. |
 | `/skills` | List discovered skills with source and `SKILL.md` path. |
+| `/debug` | Show trace recording status and the current path. |
 | `/clear` | Reset session summary/history and clear the terminal UI. |
 | `/exit` | Exit vyrn. |
 

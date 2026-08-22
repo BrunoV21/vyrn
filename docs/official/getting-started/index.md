@@ -12,10 +12,11 @@ vyrn is designed for terminal-native users running local or small LLMs through a
 ## Core flow
 
 1. Configure one or more model profiles.
-2. Start `vyrn` or `vyrn --models`.
-3. Let the startup manifest report available binaries, skills, and MCP servers.
-4. Work in the interactive REPL.
-5. Watch the composer status row after each completed request.
+2. Run `vyrn init` in a repository when you want a local `.vyrn/` scaffold.
+3. Start `vyrn` or `vyrn --models`.
+4. Let the startup manifest report available binaries, skills, and MCP servers.
+5. Work in the interactive REPL.
+6. Watch the composer status row after each completed request.
 
 ## Minimal model profile
 

@@ -342,6 +342,8 @@ This is tracked per-request and accumulated as a session total.
 vyrn runs as an interactive terminal session. The user enters requests, the agent responds, executes tools, and streams output — all within a single persistent session.
 While a request is running, `Esc` cancels the active turn and returns to the
 composer. In the composer, Up/Down recalls previous non-command prompts.
+Typing `/`, pressing `Ctrl+O`, or pressing `F1` opens the command palette;
+Up/Down selects a command and `Tab` accepts it.
 When the model calls `ask_user`, vyrn renders a clarification prompt with
 selectable options and a freeform reply path, then continues the same turn.
 
@@ -390,22 +392,28 @@ project-local override file and lets the user select one with Up/Down and Enter.
 | Command | Description |
 |---|---|
 | `vyrn` | Start interactive session with default model |
+| `vyrn -p "inspect src"` | Run one prompt non-interactively and exit; combines with `--debug`, `--context`, and `--verbose` |
+| `vyrn init` | Create a project-local `.vyrn/` scaffold |
 | `vyrn --models` | Select model before starting; `--model` is an alias |
 | `vyrn --context 2048` | Override context budget for this session |
 | `vyrn --verbose` | Show full token counts and raw summaries |
 | `vyrn --debug` | Show provider/network details and write structured LLM trace JSON |
-| `vyrn debug-viewer` | Generate a local static HTML viewer for debug trace JSON |
+| `vyrn debug-viewer [trace.json]` | Generate a local static HTML viewer; an optional trace is embedded and opened immediately |
 | `vyrn eval evals/basic.json` | Run JSON-defined live agent evals and write traces |
 
 ### 11.6 In-Session Slash Commands
 
 | Command | Description |
 |---|---|
+| `/help` | List commands and keyboard controls |
 | `/models` | Switch model mid-session; `/model` is an alias |
-| `/stats` | Show full token usage for the session |
+| `/stats` | Show provider usage, labeled estimates, and token savings for the session |
+| `/context` | Show estimated context used/available plus provider and fallback token state |
+| `/scratchpad` | Show the latest evolving tool-turn scratchpad |
 | `/manifest` | Print current machine manifest |
 | `/refresh` | Trigger `refresh_manifest` manually |
 | `/skills` | List discovered skill sources and paths |
+| `/debug` | Show whether trace recording is active and the current trace path |
 | `/clear` | Reset session summary and history |
 | `/exit` | Exit vyrn |
 
@@ -424,8 +432,19 @@ Debug mode keeps the normal UI compact while making LLM traffic auditable:
   `.vyrn/debug/sessions/` and `.vyrn/eval-runs/` if missing, and shows those
   default trace locations plus recent trace files when available.
 - Trace files include OpenAI-compatible request bodies, parsed responses, token
-  usage or estimates, call timing, action type, and harness metadata. API keys
-  and authorization headers are not written.
+  usage or estimates, call timing, action type, and harness metadata. Provider
+  prompt/completion usage wins whenever returned; fallback estimates remain
+  separate and labeled. Each request message includes its own labeled token
+  estimate because providers report aggregate call usage, not per-message
+  counts. API keys and authorization headers are not written.
+- Schema-v2 calls carry `action_scope: interaction|harness`. The viewer renders
+  human/agent calls separately from rolling-summary, scratchpad, and eval-judge
+  mechanisms so scratchpad evolution and ingestion are easy to follow.
+- Streaming requests ask OpenAI-compatible providers to include usage. Internal
+  rolling-summary and scratchpad completions are capped at 384 output tokens to
+  keep the harness responsive.
+- Parallel tool calls from one assistant response share one scratchpad update;
+  internal compaction work scales with tool batches rather than individual tools.
 
 ---
 

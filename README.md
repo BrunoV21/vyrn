@@ -88,8 +88,16 @@ Start an interactive session:
 cargo run -- --models
 ```
 
+Initialize a local project scaffold when you want repo-specific config:
+
+```bash
+cargo run -- init
+```
+
 Use Up/Down and Enter to choose a configured model profile. `--model` is accepted
-as an alias.
+as an alias. If no model profiles exist yet, vyrn prompts for a profile name,
+base URL, model ID, and optional API key, then saves the profile to
+`~/.vyrn/models.toml`.
 
 Expected session shape:
 
@@ -107,9 +115,9 @@ model glm-4-5-air  context 4096
 > /models
 ```
 
-Slash command completion appears beside the typed prefix as you type. Press `Tab`
-to accept the shown command without running it, or press `Enter` to run the shown
-completion directly.
+Type `/`, press `Ctrl+O`, or press `F1` to open the command palette. Continue
+typing to filter it, use Up/Down to select, press `Tab` to accept, or press
+`Enter` to run the selected command.
 
 The composer status row under the input box shows cumulative model I/O for the
 request, prior-history summary savings, session history savings, and the current
@@ -136,11 +144,15 @@ Multiple images can be attached to one message.
 Inside a session, local control commands are handled by vyrn:
 
 ```text
+/help       list commands and controls
 /models     switch model profile
-/stats      show token usage
+/stats      show provider usage, estimates, and savings
+/context    show context used and available
+/scratchpad show the latest evolving turn scratchpad
 /manifest   print compact machine manifest
 /refresh    rescan manifest
 /skills     list discovered skills
+/debug      show trace status and path
 /clear      reset session context and clear the terminal
 /exit       close the session
 ```
@@ -161,6 +173,12 @@ Use `--debug` when a provider request fails:
 cargo run -- --debug
 ```
 
+Run one prompt and exit for scripts or harnesses:
+
+```bash
+cargo run -- -p "inspect src and summarize the architecture" --debug
+```
+
 Debug mode shows the request URL, lower-level network error details, and provider
 response bodies for non-2xx HTTP responses. It also writes structured LLM trace
 JSON under `.vyrn/debug/sessions/`. Eval runs write per-case `llm-trace.json`
@@ -170,6 +188,7 @@ Write the local trace viewer:
 
 ```bash
 cargo run -- debug-viewer
+cargo run -- debug-viewer .vyrn/debug/sessions/1782857207560.json
 ```
 
 The viewer is a static local HTML file at `.vyrn/debug/viewer.html`. Generating it
@@ -177,6 +196,10 @@ also creates `.vyrn/debug/sessions/` and `.vyrn/eval-runs/`, displays those path
 in the page, and embeds recent trace file paths when available. Browsers do not
 let static pages force the native file picker to open a specific directory, so use
 the path hints or drag a trace JSON file into the viewer.
+Passing a trace path embeds and opens it immediately. The page separates
+human/agent interactions from harness internals and labels provider usage,
+fallback estimates, context availability, per-message estimates, and scratchpad
+evolution.
 
 Run the deterministic end-to-end REPL test:
 
