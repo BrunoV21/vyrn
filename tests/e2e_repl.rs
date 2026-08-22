@@ -3,6 +3,13 @@ use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
+#[cfg(unix)]
+use std::{
+    fs::File,
+    os::fd::FromRawFd,
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 use tempfile::tempdir;
 use vyrn::agent::tokens::estimate_chat_request_breakdown;
 use vyrn::llm::ChatMessage;
@@ -53,6 +60,113 @@ api_key = ""
     assert!(stdout.contains("turn scratchpad: none"), "{stdout}");
     assert!(stdout.contains("debug trace:"), "{stdout}");
     assert!(stdout.contains(".vyrn/debug/sessions/"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn inline_tui_submits_live_steering_during_an_active_model_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (first_request_tx, first_request_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut first, _) = listener.accept().unwrap();
+        let first_body = read_http_body(&mut first);
+        assert!(first_body.contains("Start the long task"), "{first_body}");
+        first
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Working on the old direction...\"}}]}\n\n",
+            )
+            .unwrap();
+        first.flush().unwrap();
+        first_request_tx.send(()).unwrap();
+        thread::sleep(Duration::from_millis(500));
+
+        let (mut second, _) = listener.accept().unwrap();
+        let second_body = read_http_body(&mut second);
+        assert!(
+            second_body.contains("live steering from the human"),
+            "{second_body}"
+        );
+        assert!(
+            second_body.contains("Change direction now"),
+            "{second_body}"
+        );
+        write_sse(
+            &mut second,
+            r#"data: {"choices":[{"delta":{"content":"VYRN_INLINE_STEERING_APPLIED"}}]}"#,
+        );
+    });
+
+    let temp = tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".vyrn")).unwrap();
+    std::fs::write(
+        temp.path().join(".vyrn/models.toml"),
+        format!(
+            r#"[models.llama3]
+base_url = "http://{addr}/v1"
+model = "fake-small"
+"#
+        ),
+    )
+    .unwrap();
+
+    let (mut master, slave) = open_pty();
+    let stdin = slave.try_clone().unwrap();
+    let stdout = slave.try_clone().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .stdin(Stdio::from(stdin))
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let reader_output = Arc::clone(&output);
+    let mut reader = master.try_clone().unwrap();
+    let reader_handle = thread::spawn(move || {
+        let mut buffer = [0_u8; 2048];
+        while let Ok(read) = reader.read(&mut buffer) {
+            if read == 0 {
+                break;
+            }
+            reader_output
+                .lock()
+                .unwrap()
+                .extend_from_slice(&buffer[..read]);
+        }
+    });
+
+    wait_for_pty_output(&output, "type / or press Ctrl+O for commands", 5);
+    master.write_all(b"Start the long task\r").unwrap();
+    master.flush().unwrap();
+    first_request_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first model request did not start");
+    master.write_all(b"Change direction now\r").unwrap();
+    master.flush().unwrap();
+
+    wait_for_pty_output(&output, "VYRN_INLINE_STEERING_APPLIED", 5);
+    wait_for_pty_output(&output, "turn spent:", 5);
+    master.write_all(b"/exit\r").unwrap();
+    master.flush().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "inline vyrn exited with {status}");
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("inline vyrn did not exit after /exit");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    drop(master);
+    reader_handle.join().unwrap();
+    server.join().unwrap();
 }
 
 #[test]
@@ -126,6 +240,7 @@ api_key = ""
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("> using llama3 @"));
     assert!(stdout.contains("[read_file ok]"));
+    assert!(stdout.contains("[updating turn memory...]"), "{stdout}");
     assert!(stdout.contains("I read fixture.txt: hello from e2e."));
     assert!(stdout.contains("turn scratchpad ("), "{stdout}");
     assert!(stdout.contains("read_file saw fixture.txt"), "{stdout}");
@@ -881,4 +996,51 @@ fn write_json(stream: &mut TcpStream, body: &str) {
         body
     );
     stream.write_all(response.as_bytes()).unwrap();
+}
+
+#[cfg(unix)]
+fn open_pty() -> (File, File) {
+    let mut master_fd = -1;
+    let mut slave_fd = -1;
+    let mut window = libc::winsize {
+        ws_row: 30,
+        ws_col: 120,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let result = unsafe {
+        libc::openpty(
+            &mut master_fd,
+            &mut slave_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut window,
+        )
+    };
+    assert_eq!(
+        result,
+        0,
+        "openpty failed: {}",
+        std::io::Error::last_os_error()
+    );
+    let master = unsafe { File::from_raw_fd(master_fd) };
+    let slave = unsafe { File::from_raw_fd(slave_fd) };
+    (master, slave)
+}
+
+#[cfg(unix)]
+fn wait_for_pty_output(output: &Arc<Mutex<Vec<u8>>>, needle: &str, timeout_seconds: u64) {
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    loop {
+        let snapshot = output.lock().unwrap().clone();
+        if String::from_utf8_lossy(&snapshot).contains(needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {needle:?}; output:\n{}",
+            String::from_utf8_lossy(&snapshot)
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 }

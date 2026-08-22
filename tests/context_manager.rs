@@ -35,6 +35,7 @@ fn context_tracks_raw_history_tokens_until_clear() {
     context.set_previous_exchange(Exchange {
         user_input: "read the file".to_string(),
         assistant_text: "I read it.".to_string(),
+        turn_scratchpad: "file marker was VIOLET_ORBIT".to_string(),
         tool_calls: Vec::new(),
         tool_results: vec![ToolResult::text("read_file", "important file contents")],
     });
@@ -46,6 +47,26 @@ fn context_tracks_raw_history_tokens_until_clear() {
 
     assert_eq!(context.raw_history_tokens(), 0);
     assert!(context.previous_exchange().is_none());
+}
+
+#[test]
+fn context_memory_keeps_goal_recent_exchange_and_tool_scratchpad() {
+    let mut context =
+        vyrn::agent::context::ContextManager::new(1000, SummaryAggressiveness::Medium);
+    context.begin_turn("keep the original violet goal");
+    context.set_previous_exchange(Exchange {
+        user_input: "read the marker".to_string(),
+        assistant_text: "ready".to_string(),
+        turn_scratchpad: "marker is VIOLET_7319".to_string(),
+        tool_calls: Vec::new(),
+        tool_results: Vec::new(),
+    });
+
+    let memory = context.prompt_memory().unwrap();
+
+    assert!(memory.contains("keep the original violet goal"));
+    assert!(memory.contains("read the marker"));
+    assert!(memory.contains("VIOLET_7319"));
 }
 
 #[test]

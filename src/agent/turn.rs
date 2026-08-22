@@ -1,6 +1,6 @@
 use crate::agent::tokens::{estimate_chat_request_breakdown, estimate_messages_breakdown};
 use crate::agent::transcript::truncate;
-use crate::llm::{ChatMessage, LlmError, MessageContent};
+use crate::llm::{ChatMessage, LlmError, MessageContent, ToolCall};
 
 const TOOL_CONTEXT_COMPACTION_PERCENT: usize = 70;
 const COMPACTED_TOOL_RESULT_CONTENT: &str = "[tool output compacted into turn scratchpad]";
@@ -41,6 +41,26 @@ pub fn build_turn_messages(
     }
     messages.extend(current_tool_batch.iter().cloned());
     messages
+}
+
+pub fn live_steering_message(text: &str) -> ChatMessage {
+    ChatMessage::user(format!(
+        "[live steering from the human]\n{text}\nApply this immediately. Reconsider the next action before continuing."
+    ))
+}
+
+pub fn apply_live_steering_to_tool_batch(
+    tool_batch: &mut Vec<ChatMessage>,
+    interrupted_calls: &[ToolCall],
+    text: &str,
+) {
+    for call in interrupted_calls {
+        tool_batch.push(ChatMessage::tool(
+            call.id.clone(),
+            "tool execution interrupted by live user steering",
+        ));
+    }
+    tool_batch.push(live_steering_message(text));
 }
 
 pub fn prepare_next_turn_context(
@@ -340,6 +360,39 @@ mod tests {
             !messages
                 .iter()
                 .any(|message| message.tool_call_id.as_deref() == Some("call_1"))
+        );
+    }
+
+    #[test]
+    fn live_steering_message_is_an_immediate_human_instruction() {
+        let message = live_steering_message("stop and inspect the tests");
+
+        assert_eq!(message.role, "user");
+        let content = message.content_text().unwrap();
+        assert!(content.contains("live steering from the human"));
+        assert!(content.contains("stop and inspect the tests"));
+        assert!(content.contains("Apply this immediately"));
+    }
+
+    #[test]
+    fn live_steering_completes_interrupted_tool_protocol_before_user_message() {
+        let call = tool_call("call_write", "write_file");
+        let mut batch = vec![ChatMessage::assistant_tool_calls(
+            String::new(),
+            vec![call.clone()],
+        )];
+
+        apply_live_steering_to_tool_batch(&mut batch, &[call], "do not write the file");
+
+        assert_eq!(batch.len(), 3);
+        assert_eq!(batch[1].role, "tool");
+        assert_eq!(batch[1].tool_call_id.as_deref(), Some("call_write"));
+        assert_eq!(batch[2].role, "user");
+        assert!(
+            batch[2]
+                .content_text()
+                .unwrap()
+                .contains("do not write the file")
         );
     }
 

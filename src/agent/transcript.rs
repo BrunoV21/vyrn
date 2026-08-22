@@ -5,6 +5,7 @@ use crate::tools::ToolResult;
 pub struct Exchange {
     pub user_input: String,
     pub assistant_text: String,
+    pub turn_scratchpad: String,
     pub tool_calls: Vec<ToolCall>,
     pub tool_results: Vec<ToolResult>,
 }
@@ -15,6 +16,11 @@ impl Exchange {
         out.push_str("user: ");
         out.push_str(&self.user_input);
         out.push('\n');
+        if !self.turn_scratchpad.trim().is_empty() {
+            out.push_str("turn_scratchpad:\n");
+            out.push_str(&truncate(self.turn_scratchpad.trim(), 2400));
+            out.push('\n');
+        }
         if !self.assistant_text.is_empty() {
             out.push_str("assistant: ");
             out.push_str(&self.assistant_text);

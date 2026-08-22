@@ -5,7 +5,8 @@ use crate::agent::tokens::{
 };
 use crate::agent::transcript::{Exchange, truncate};
 use crate::agent::turn::{
-    TurnScratchpad, build_fitted_turn_scratchpad_update_messages, build_turn_messages,
+    TurnScratchpad, apply_live_steering_to_tool_batch,
+    build_fitted_turn_scratchpad_update_messages, build_turn_messages, live_steering_message,
     prepare_next_turn_context, turn_scratchpad_update_source,
 };
 use crate::app::App;
@@ -34,6 +35,7 @@ use std::fs::OpenOptions;
 use std::io::IsTerminal;
 use std::io::Write;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -288,94 +290,141 @@ impl Repl {
             let mut assistant_prefix_printed = false;
             let mut assistant_display_started = false;
             let mut assistant_renderer = MarkdownStreamRenderer::new();
-            let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
-            let cancel_stop = Arc::new(AtomicBool::new(false));
-            let cancel_handle = spawn_escape_listener(
-                Arc::clone(&cancel_stop),
+            let (active_input_tx, mut active_input_rx) = tokio::sync::mpsc::unbounded_channel();
+            let active_input_stop = Arc::new(AtomicBool::new(false));
+            let active_input_buffer = Arc::new(Mutex::new(String::new()));
+            let active_input_handle = spawn_active_turn_listener(
+                Arc::clone(&active_input_stop),
                 Arc::clone(&self.input_pause),
-                cancel_tx,
+                Arc::clone(&active_input_buffer),
+                active_input_tx,
             );
-            let turn = self.handle_user_turn_with(input, |update| match update {
-                TuiUpdate::SummaryStart => {
-                    if let Some(spinner) = spinner.take() {
-                        spinner.stop();
-                    }
-                    spinner = Some(Spinner::start("integrating previous turn"));
-                }
-                TuiUpdate::SummaryDone => {
-                    if let Some(spinner) = spinner.take() {
-                        spinner.stop();
-                    }
-                }
-                TuiUpdate::AssistantStart => {
-                    if let Some(spinner) = spinner.take() {
-                        spinner.stop();
-                    }
-                    spinner = Some(Spinner::start("thinking"));
-                }
-                TuiUpdate::AssistantDelta(delta) => {
-                    if let Some(spinner) = spinner.take() {
-                        spinner.stop();
-                    }
-                    let delta = if assistant_display_started {
-                        delta
-                    } else {
-                        delta.trim_start_matches(['\r', '\n']).to_string()
-                    };
-                    if !delta.is_empty() {
-                        assistant_display_started = true;
-                        if !assistant_prefix_printed {
-                            let _ = print_assistant_prefix();
-                            assistant_prefix_printed = true;
+            let result = self
+                .handle_user_turn_with_active_input(input, &mut active_input_rx, |update| {
+                    match update {
+                        TuiUpdate::SummaryStart => {
+                            if let Some(spinner) = spinner.take() {
+                                spinner.stop();
+                            }
+                            spinner = Some(Spinner::start(
+                                "integrating previous turn",
+                                Arc::clone(&active_input_buffer),
+                            ));
                         }
-                        let _ = assistant_renderer.push(&delta);
+                        TuiUpdate::SummaryDone => {
+                            if let Some(spinner) = spinner.take() {
+                                spinner.stop();
+                            }
+                        }
+                        TuiUpdate::AssistantStart => {
+                            if let Some(spinner) = spinner.take() {
+                                spinner.stop();
+                            }
+                            spinner =
+                                Some(Spinner::start("thinking", Arc::clone(&active_input_buffer)));
+                        }
+                        TuiUpdate::AssistantDelta(delta) => {
+                            if let Some(spinner) = spinner.take() {
+                                spinner.stop();
+                            }
+                            if active_input_buffer
+                                .lock()
+                                .is_ok_and(|input| !input.is_empty())
+                            {
+                                return;
+                            }
+                            let delta = if assistant_display_started {
+                                delta
+                            } else {
+                                delta.trim_start_matches(['\r', '\n']).to_string()
+                            };
+                            if !delta.is_empty() {
+                                assistant_display_started = true;
+                                if !assistant_prefix_printed {
+                                    let _ = print_assistant_prefix();
+                                    assistant_prefix_printed = true;
+                                }
+                                let _ = assistant_renderer.push(&delta);
+                            }
+                        }
+                        TuiUpdate::AssistantDone => {
+                            if let Some(spinner) = spinner.take() {
+                                spinner.stop();
+                            }
+                            if assistant_prefix_printed {
+                                let _ = assistant_renderer.finish();
+                                let _ = finish_assistant_block();
+                                assistant_prefix_printed = false;
+                                assistant_display_started = false;
+                                assistant_renderer = MarkdownStreamRenderer::new();
+                            }
+                        }
+                        TuiUpdate::AssistantInterrupted => {
+                            if let Some(spinner) = spinner.take() {
+                                spinner.stop();
+                            }
+                            assistant_prefix_printed = false;
+                            assistant_display_started = false;
+                            assistant_renderer = MarkdownStreamRenderer::new();
+                            let _ = clear_active_turn_input();
+                        }
+                        TuiUpdate::ToolStarted(name) => {
+                            if let Some(spinner) = spinner.take() {
+                                spinner.stop();
+                            }
+                            spinner = Some(Spinner::start(
+                                format!("running tool {name}"),
+                                Arc::clone(&active_input_buffer),
+                            ));
+                        }
+                        TuiUpdate::ToolInputStart => {
+                            if let Some(spinner) = spinner.take() {
+                                spinner.stop();
+                            }
+                        }
+                        TuiUpdate::ToolOk { name, preview } => {
+                            if let Some(spinner) = spinner.take() {
+                                spinner.stop();
+                            }
+                            let _ = print_tool_preview(&name, &preview);
+                        }
+                        TuiUpdate::ToolError { name, error } => {
+                            if let Some(spinner) = spinner.take() {
+                                spinner.stop();
+                            }
+                            let _ = print_tool_error(&name, &error);
+                        }
+                        TuiUpdate::ScratchpadStart => {
+                            if let Some(spinner) = spinner.take() {
+                                spinner.stop();
+                            }
+                            spinner = Some(Spinner::start(
+                                "updating turn memory",
+                                Arc::clone(&active_input_buffer),
+                            ));
+                        }
+                        TuiUpdate::ScratchpadDone => {
+                            if let Some(spinner) = spinner.take() {
+                                spinner.stop();
+                            }
+                        }
+                        TuiUpdate::Steering(text) => {
+                            if let Some(spinner) = spinner.take() {
+                                spinner.stop();
+                            }
+                            let _ = print_steering_block(&text);
+                        }
+                        TuiUpdate::Stats(stats) => {
+                            composer_status = stats;
+                        }
+                        TuiUpdate::Summary(summary) => {
+                            let _ = print_system_block(&format!("summary\n{summary}"));
+                        }
                     }
-                }
-                TuiUpdate::AssistantDone => {
-                    if let Some(spinner) = spinner.take() {
-                        spinner.stop();
-                    }
-                    if assistant_prefix_printed {
-                        let _ = assistant_renderer.finish();
-                        let _ = finish_assistant_block();
-                    }
-                }
-                TuiUpdate::ToolStarted(name) => {
-                    if let Some(spinner) = spinner.take() {
-                        spinner.stop();
-                    }
-                    spinner = Some(Spinner::start(format!("running tool {name}")));
-                }
-                TuiUpdate::ToolInputStart => {
-                    if let Some(spinner) = spinner.take() {
-                        spinner.stop();
-                    }
-                }
-                TuiUpdate::ToolOk { name, preview } => {
-                    if let Some(spinner) = spinner.take() {
-                        spinner.stop();
-                    }
-                    let _ = print_tool_preview(&name, &preview);
-                }
-                TuiUpdate::ToolError { name, error } => {
-                    if let Some(spinner) = spinner.take() {
-                        spinner.stop();
-                    }
-                    let _ = print_tool_error(&name, &error);
-                }
-                TuiUpdate::Stats(stats) => {
-                    composer_status = stats;
-                }
-                TuiUpdate::Summary(summary) => {
-                    let _ = print_system_block(&format!("summary\n{summary}"));
-                }
-            });
-            let result = tokio::select! {
-                result = turn => result,
-                _ = &mut cancel_rx => Err(LlmError::Canceled),
-            };
-            cancel_stop.store(true, Ordering::Relaxed);
-            let _ = cancel_handle.join();
+                })
+                .await;
+            active_input_stop.store(true, Ordering::Relaxed);
+            let _ = active_input_handle.join();
             if let Some(spinner) = spinner.take() {
                 spinner.stop();
             }
@@ -533,7 +582,10 @@ impl Repl {
 
     async fn handle_user_turn(&mut self, user_input: UserTurnInput) -> Result<(), LlmError> {
         self.handle_user_turn_with(user_input, |update| match update {
-            TuiUpdate::SummaryStart => println!("[integrating previous turn...]"),
+            TuiUpdate::SummaryStart => {
+                println!("[integrating previous turn...] ");
+                let _ = std::io::stdout().flush();
+            }
             TuiUpdate::SummaryDone => {}
             TuiUpdate::AssistantDelta(delta) => {
                 print!("{delta}");
@@ -544,6 +596,7 @@ impl Repl {
                 let _ = std::io::stdout().flush();
             }
             TuiUpdate::AssistantDone => println!(),
+            TuiUpdate::AssistantInterrupted => println!(),
             TuiUpdate::ToolStarted(name) => println!("\n[tool {name}]"),
             TuiUpdate::ToolInputStart => {}
             TuiUpdate::ToolOk { name, preview } => {
@@ -553,6 +606,12 @@ impl Repl {
                 }
             }
             TuiUpdate::ToolError { name, error } => println!("[{name} error] {error}"),
+            TuiUpdate::ScratchpadStart => {
+                print!("[updating turn memory...] ");
+                let _ = std::io::stdout().flush();
+            }
+            TuiUpdate::ScratchpadDone => println!(),
+            TuiUpdate::Steering(text) => println!("[live steering] {text}"),
             TuiUpdate::Stats(stats) => println!("{stats}"),
             TuiUpdate::Summary(summary) => println!("[summary]\n{summary}"),
         })
@@ -562,11 +621,27 @@ impl Repl {
     async fn handle_user_turn_with<F>(
         &mut self,
         user_input: UserTurnInput,
+        emit: F,
+    ) -> Result<(), LlmError>
+    where
+        F: FnMut(TuiUpdate),
+    {
+        let (_active_input_tx, mut active_input_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.handle_user_turn_with_active_input(user_input, &mut active_input_rx, emit)
+            .await
+    }
+
+    async fn handle_user_turn_with_active_input<F>(
+        &mut self,
+        user_input: UserTurnInput,
+        active_input: &mut tokio::sync::mpsc::UnboundedReceiver<ActiveTurnInput>,
         mut emit: F,
     ) -> Result<(), LlmError>
     where
         F: FnMut(TuiUpdate),
     {
+        self.app.context.begin_turn(&user_input.text);
+        let initial_memory = self.app.context.prompt_memory();
         let text_images = vision::attachments_from_text(&user_input.text)
             .await
             .map_err(|error| LlmError::Input(error.to_string()))?;
@@ -578,7 +653,7 @@ impl Repl {
         let initial_prompt = build_agent_prompt(
             &self.app.tools,
             &self.app.manifest,
-            self.app.context.summary(),
+            initial_memory.as_deref(),
             &user_input.text,
             &images,
         );
@@ -591,14 +666,13 @@ impl Repl {
             self.app.context.summary().is_some()
         ));
         let mut usage = TurnUsage::default();
+        let mut steering_inputs = Vec::new();
 
         if self.app.context.previous_exchange().is_some() {
             emit(TuiUpdate::SummaryStart);
         }
-        if let Some(summary_usage) = self
-            .app
-            .context
-            .refresh_summary(
+        let summary_or_input = {
+            let summary_future = self.app.context.refresh_summary(
                 &self.app.client,
                 initial_prompt.estimated_tokens.tokens,
                 self.app.trace.as_mut(),
@@ -609,41 +683,57 @@ impl Repl {
                     context_limit: Some(self.app.config.context.max_tokens),
                     ..TraceMetadata::default()
                 },
-            )
-            .await?
-        {
-            let summary_total = summary_usage.input_tokens + summary_usage.output_tokens;
-            self.debug_log(format!(
-                "summary_refresh input_tokens={} output_tokens={} total_tokens={} next_prompt_estimate={}",
-                summary_usage.input_tokens,
-                summary_usage.output_tokens,
-                summary_total,
-                initial_prompt.estimated_tokens.tokens
-            ));
-            usage.add_model_call_with_breakdown(
-                "summary",
-                TokenCount {
-                    tokens: summary_usage.input_tokens,
-                    source: summary_usage.input_source,
-                },
-                TokenCount {
-                    tokens: summary_usage.output_tokens,
-                    source: summary_usage.output_source,
-                },
-                summary_total,
-                TokenBreakdown {
-                    summary_inputs: summary_usage.input_tokens,
-                    summary_outputs: summary_usage.output_tokens,
-                    ..TokenBreakdown::default()
-                },
             );
+            tokio::select! {
+                biased;
+                Some(input) = active_input.recv() => Err(input),
+                summary = summary_future => Ok(summary),
+            }
+        };
+        match summary_or_input {
+            Ok(summary_result) => {
+                if let Some(summary_usage) = summary_result? {
+                    let summary_total = summary_usage.input_tokens + summary_usage.output_tokens;
+                    self.debug_log(format!(
+                        "summary_refresh input_tokens={} output_tokens={} total_tokens={} next_prompt_estimate={}",
+                        summary_usage.input_tokens,
+                        summary_usage.output_tokens,
+                        summary_total,
+                        initial_prompt.estimated_tokens.tokens
+                    ));
+                    usage.add_model_call_with_breakdown(
+                        "summary",
+                        TokenCount {
+                            tokens: summary_usage.input_tokens,
+                            source: summary_usage.input_source,
+                        },
+                        TokenCount {
+                            tokens: summary_usage.output_tokens,
+                            source: summary_usage.output_source,
+                        },
+                        summary_total,
+                        TokenBreakdown {
+                            summary_inputs: summary_usage.input_tokens,
+                            summary_outputs: summary_usage.output_tokens,
+                            ..TokenBreakdown::default()
+                        },
+                    );
+                }
+            }
+            Err(ActiveTurnInput::Cancel) => return Err(LlmError::Canceled),
+            Err(ActiveTurnInput::Steering(text)) => {
+                self.debug_log("live_steering_summary_interrupt");
+                emit(TuiUpdate::Steering(text.clone()));
+                steering_inputs.push(text);
+            }
         }
         emit(TuiUpdate::SummaryDone);
 
+        let prompt_memory = self.app.context.prompt_memory();
         let prompt = build_agent_prompt(
             &self.app.tools,
             &self.app.manifest,
-            self.app.context.summary(),
+            prompt_memory.as_deref(),
             &user_input.text,
             &images,
         );
@@ -651,7 +741,10 @@ impl Repl {
         let base_messages = prompt.messages;
         let mut scratchpad = TurnScratchpad::default();
         self.last_scratchpad = scratchpad.clone();
-        let mut current_tool_batch = Vec::new();
+        let mut current_tool_batch = steering_inputs
+            .iter()
+            .map(|text| live_steering_message(text))
+            .collect::<Vec<_>>();
         let mut last_request_messages =
             build_turn_messages(&base_messages, &scratchpad, &current_tool_batch);
         let mut assistant_text = String::new();
@@ -659,7 +752,18 @@ impl Repl {
         let mut all_tool_results = Vec::new();
         let mut hit_tool_round_limit = false;
 
-        for round in 0..MAX_TOOL_ROUNDS {
+        'agent_rounds: for round in 0..MAX_TOOL_ROUNDS {
+            while let Ok(input) = active_input.try_recv() {
+                match input {
+                    ActiveTurnInput::Cancel => return Err(LlmError::Canceled),
+                    ActiveTurnInput::Steering(text) => {
+                        self.debug_log(format!("live_steering_queued round={round}"));
+                        emit(TuiUpdate::Steering(text.clone()));
+                        current_tool_batch.push(live_steering_message(&text));
+                        steering_inputs.push(text);
+                    }
+                }
+            }
             let tool_schemas = self.app.tools.schemas();
             let messages = build_turn_messages(&base_messages, &scratchpad, &current_tool_batch);
             let request_breakdown = estimate_chat_request_breakdown(&messages, &tool_schemas);
@@ -719,21 +823,70 @@ impl Repl {
                     },
                 )
             });
-            let response_result = self
-                .app
-                .client
-                .stream_chat(request, |event| match event {
-                    StreamEvent::TextDelta(delta) => emit(TuiUpdate::AssistantDelta(delta)),
+            let mut streamed_text = String::new();
+            let response_or_input = {
+                let response_future = self.app.client.stream_chat(request, |event| match event {
+                    StreamEvent::TextDelta(delta) => {
+                        streamed_text.push_str(&delta);
+                        emit(TuiUpdate::AssistantDelta(delta));
+                    }
                     StreamEvent::ToolCallDone(call) => {
                         emit(TuiUpdate::ToolStarted(call.function.name));
                     }
                     StreamEvent::Finished => {}
-                })
-                .await;
-            if let (Some(trace), Some(pending_trace)) = (self.app.trace.as_mut(), pending_trace) {
-                let _ = trace.finish_call(pending_trace, &response_result);
-            }
-            let response = response_result?;
+                });
+                tokio::select! {
+                    biased;
+                    Some(input) = active_input.recv() => Err(input),
+                    response = response_future => Ok(response),
+                }
+            };
+            let response = match response_or_input {
+                Ok(response_result) => {
+                    if let (Some(trace), Some(pending_trace)) =
+                        (self.app.trace.as_mut(), pending_trace)
+                    {
+                        let _ = trace.finish_call(pending_trace, &response_result);
+                    }
+                    response_result?
+                }
+                Err(input) => {
+                    let interrupted = Err(LlmError::Input(
+                        "model request interrupted by live user steering".to_string(),
+                    ));
+                    if let (Some(trace), Some(pending_trace)) =
+                        (self.app.trace.as_mut(), pending_trace)
+                    {
+                        let _ = trace.finish_call(pending_trace, &interrupted);
+                    }
+                    emit(TuiUpdate::AssistantInterrupted);
+                    last_request_messages = messages;
+                    let partial_output_tokens =
+                        crate::agent::tokens::estimate_text_tokens(&streamed_text);
+                    let mut interrupted_breakdown = request_breakdown;
+                    interrupted_breakdown.assistant_outputs += partial_output_tokens;
+                    usage.add_model_call_with_breakdown(
+                        format!("agent-{round}-interrupted"),
+                        TokenCount::estimate(request_tokens),
+                        TokenCount::estimate(partial_output_tokens),
+                        request_would_be.saturating_add(partial_output_tokens),
+                        interrupted_breakdown,
+                    );
+                    match input {
+                        ActiveTurnInput::Cancel => return Err(LlmError::Canceled),
+                        ActiveTurnInput::Steering(text) => {
+                            self.debug_log(format!(
+                                "live_steering_model_interrupt round={round} partial_chars={}",
+                                streamed_text.chars().count()
+                            ));
+                            emit(TuiUpdate::Steering(text.clone()));
+                            current_tool_batch.push(live_steering_message(&text));
+                            steering_inputs.push(text);
+                            continue 'agent_rounds;
+                        }
+                    }
+                }
+            };
             emit(TuiUpdate::AssistantDone);
             last_request_messages = messages;
 
@@ -793,11 +946,47 @@ impl Repl {
             let assistant_tool_message = message;
             let tool_count = tool_calls.len();
             current_tool_batch = vec![assistant_tool_message.clone()];
-            for call in tool_calls {
+            for (call_index, call) in tool_calls.iter().cloned().enumerate() {
+                all_tool_calls.push(call.clone());
                 if call.function.name == ASK_USER_TOOL_NAME {
                     emit(TuiUpdate::ToolInputStart);
                 }
-                let result = self.execute_tool_call(&call).await;
+                let result_or_input = if call.function.name == ASK_USER_TOOL_NAME {
+                    Ok(self.execute_tool_call(&call).await)
+                } else {
+                    tokio::select! {
+                        biased;
+                        Some(input) = active_input.recv() => Err(input),
+                        result = self.execute_tool_call(&call) => Ok(result),
+                    }
+                };
+                let result = match result_or_input {
+                    Ok(result) => result,
+                    Err(ActiveTurnInput::Cancel) => return Err(LlmError::Canceled),
+                    Err(ActiveTurnInput::Steering(text)) => {
+                        self.debug_log(format!(
+                            "live_steering_tool_interrupt round={round} tool={} index={call_index}",
+                            call.function.name
+                        ));
+                        apply_live_steering_to_tool_batch(
+                            &mut current_tool_batch,
+                            &tool_calls[call_index..],
+                            &text,
+                        );
+                        emit(TuiUpdate::Steering(text.clone()));
+                        steering_inputs.push(text);
+                        let next_context = prepare_next_turn_context(
+                            &base_messages,
+                            &scratchpad,
+                            &current_tool_batch,
+                            &tool_schemas,
+                            self.app.config.context.max_tokens,
+                        )?;
+                        scratchpad = next_context.scratchpad;
+                        current_tool_batch = next_context.tool_batch;
+                        continue 'agent_rounds;
+                    }
+                };
                 if matches!(result, Err(crate::tools::ToolError::Canceled)) {
                     return Err(LlmError::Canceled);
                 }
@@ -839,19 +1028,42 @@ impl Repl {
                         current_tool_batch.push(tool_message);
                     }
                 }
-                all_tool_calls.push(call);
             }
             let last_tool_index = tool_count.saturating_sub(1);
-            scratchpad = self
-                .update_turn_scratchpad(
+            emit(TuiUpdate::ScratchpadStart);
+            let scratchpad_or_input = tokio::select! {
+                biased;
+                Some(input) = active_input.recv() => Err(input),
+                result = self.update_turn_scratchpad(
                     &scratchpad,
                     &current_tool_batch,
                     &assistant_tool_message,
                     &mut usage,
                     round,
                     last_tool_index,
-                )
-                .await?;
+                ) => Ok(result),
+            };
+            emit(TuiUpdate::ScratchpadDone);
+            scratchpad = match scratchpad_or_input {
+                Ok(result) => result?,
+                Err(ActiveTurnInput::Cancel) => return Err(LlmError::Canceled),
+                Err(ActiveTurnInput::Steering(text)) => {
+                    self.debug_log(format!("live_steering_scratchpad_interrupt round={round}"));
+                    emit(TuiUpdate::Steering(text.clone()));
+                    current_tool_batch.push(live_steering_message(&text));
+                    steering_inputs.push(text);
+                    let next_context = prepare_next_turn_context(
+                        &base_messages,
+                        &scratchpad,
+                        &current_tool_batch,
+                        &tool_schemas,
+                        self.app.config.context.max_tokens,
+                    )?;
+                    scratchpad = next_context.scratchpad;
+                    current_tool_batch = next_context.tool_batch;
+                    continue 'agent_rounds;
+                }
+            };
             self.last_scratchpad = scratchpad.clone();
             self.debug_log(format!(
                 "turn_scratchpad_update round={} tools={} tokens={} chars={}",
@@ -888,8 +1100,13 @@ impl Repl {
         }
 
         self.app.context.set_previous_exchange(Exchange {
-            user_input: exchange_user_input(&user_input.text, images.len()),
+            user_input: exchange_user_input_with_steering(
+                &user_input.text,
+                images.len(),
+                &steering_inputs,
+            ),
             assistant_text,
+            turn_scratchpad: scratchpad.summary.clone(),
             tool_calls: all_tool_calls,
             tool_results: all_tool_results,
         });
@@ -1240,7 +1457,7 @@ impl Repl {
             text.push_str(&format_breakdown(
                 &self.session_breakdown(),
                 self.app.stats.session_sent,
-                8,
+                16,
             ));
         }
         if self.app.verbose {
@@ -1363,15 +1580,15 @@ impl Repl {
 
 fn help_text() -> String {
     let mut lines = vec!["commands".to_string()];
-    lines.extend(
-        SLASH_COMMANDS
-            .iter()
-            .map(|command| format!("  {:<12} {}", command.name, command.description)),
-    );
+    for command in SLASH_COMMANDS {
+        lines.push(format!("  {:<12} {}", command.name, command.description));
+        lines.push(String::new());
+    }
     lines.push("controls".to_string());
     lines.push("  / or Ctrl+O  open command palette".to_string());
     lines.push("  Up/Down      select command or recall prompt".to_string());
     lines.push("  Tab           accept selected command".to_string());
+    lines.push("  type + Enter  steer the agent during an active turn".to_string());
     lines.push("  Esc           cancel active turn; exit from composer".to_string());
     lines.join("\n")
 }
@@ -1439,6 +1656,7 @@ fn select_model_by_number(profiles: &[ModelProfile]) -> anyhow::Result<ModelPick
             profile.model,
             profile.base_url
         );
+        println!();
     }
     println!("{}. configure new model", profiles.len() + 1);
 
@@ -1461,7 +1679,7 @@ fn select_model_by_number(profiles: &[ModelProfile]) -> anyhow::Result<ModelPick
 fn select_model_with_arrows(
     profiles: &[ModelProfile],
 ) -> anyhow::Result<Option<ModelPickerChoice>> {
-    println!("\r\n{}", "models".with(STEEL_BLUE).bold());
+    println!("\r\n{}", "models".with(VY_VIOLET).bold());
     let mut selected = 0;
     render_model_picker(profiles, selected, false)?;
 
@@ -1514,7 +1732,7 @@ fn render_model_picker(
     selected: usize,
     redraw: bool,
 ) -> anyhow::Result<()> {
-    let row_count = profiles.len().saturating_add(2);
+    let row_count = profiles.len().saturating_mul(2).saturating_add(3);
     if redraw {
         execute!(
             std::io::stdout(),
@@ -1542,14 +1760,21 @@ fn render_model_picker(
         if idx == selected {
             execute!(
                 std::io::stdout(),
-                SetForegroundColor(STEEL_BLUE),
+                SetForegroundColor(VY_VIOLET),
                 Print("> "),
                 Print(row),
                 ResetColor,
-                Print("\r\n")
+                Print("\r\n\r\n")
             )?;
         } else {
-            execute!(std::io::stdout(), Print("  "), Print(row), Print("\r\n"))?;
+            execute!(
+                std::io::stdout(),
+                SetForegroundColor(VY_TEXT_MUTED),
+                Print("  "),
+                Print(row),
+                ResetColor,
+                Print("\r\n\r\n")
+            )?;
         }
     }
 
@@ -1564,13 +1789,15 @@ fn render_model_picker(
             SetForegroundColor(VY_VIOLET),
             Print("> configure new model"),
             ResetColor,
-            Print("\r\n")
+            Print("\r\n\r\n")
         )?;
     } else {
         execute!(
             std::io::stdout(),
+            SetForegroundColor(VY_TEXT_MUTED),
             Print("  configure new model"),
-            Print("\r\n")
+            ResetColor,
+            Print("\r\n\r\n")
         )?;
     }
 
@@ -1602,7 +1829,7 @@ fn configure_and_insert_model(
 
 fn configure_model_profile(sources: &ConfigSources) -> anyhow::Result<ModelProfile> {
     println!();
-    println!("{}", "configure model".with(STEEL_BLUE).bold());
+    println!("{}", "configure model".with(VY_VIOLET).bold());
     println!("profiles are saved to {}", sources.global_models.display());
 
     let name = prompt_with_default("profile name", "llama3")?;
@@ -1653,10 +1880,14 @@ enum TuiUpdate {
     AssistantStart,
     AssistantDelta(String),
     AssistantDone,
+    AssistantInterrupted,
     ToolStarted(String),
     ToolInputStart,
     ToolOk { name: String, preview: String },
     ToolError { name: String, error: String },
+    ScratchpadStart,
+    ScratchpadDone,
+    Steering(String),
     Stats(String),
     Summary(String),
 }
@@ -1664,6 +1895,11 @@ enum TuiUpdate {
 enum ClarificationChoice {
     Option(usize),
     Other,
+}
+
+enum ActiveTurnInput {
+    Steering(String),
+    Cancel,
 }
 
 struct InputPauseGuard {
@@ -1719,35 +1955,96 @@ impl Drop for CookedModeGuard {
     }
 }
 
-fn spawn_escape_listener(
+fn spawn_active_turn_listener(
     stop: Arc<AtomicBool>,
     pause: Arc<AtomicBool>,
-    cancel_tx: tokio::sync::oneshot::Sender<()>,
+    buffer: Arc<Mutex<String>>,
+    input_tx: tokio::sync::mpsc::UnboundedSender<ActiveTurnInput>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let mut cancel_tx = Some(cancel_tx);
         while !stop.load(Ordering::Relaxed) {
             if pause.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(50));
                 continue;
             }
             match event::poll(Duration::from_millis(50)) {
-                Ok(true) => {
-                    let Ok(Event::Key(key)) = event::read() else {
-                        continue;
-                    };
-                    if key.code == KeyCode::Esc {
-                        if let Some(cancel_tx) = cancel_tx.take() {
-                            let _ = cancel_tx.send(());
+                Ok(true) => match event::read() {
+                    Ok(Event::Key(key)) => match key.code {
+                        KeyCode::Esc | KeyCode::Char('c')
+                            if key.code == KeyCode::Esc
+                                || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            let _ = input_tx.send(ActiveTurnInput::Cancel);
+                            break;
                         }
-                        break;
+                        KeyCode::Enter => {
+                            let message = buffer
+                                .lock()
+                                .map(|mut buffer| {
+                                    let message = buffer.trim().to_string();
+                                    buffer.clear();
+                                    message
+                                })
+                                .unwrap_or_default();
+                            let _ = clear_active_turn_input();
+                            if !message.is_empty() {
+                                let _ = input_tx.send(ActiveTurnInput::Steering(message));
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if let Ok(mut buffer) = buffer.lock() {
+                                buffer.pop();
+                                let _ = render_active_turn_input(&buffer);
+                            }
+                        }
+                        KeyCode::Char(ch)
+                            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                        {
+                            if let Ok(mut buffer) = buffer.lock() {
+                                buffer.push(ch);
+                                let _ = render_active_turn_input(&buffer);
+                            }
+                        }
+                        _ => {}
+                    },
+                    Ok(Event::Paste(text)) => {
+                        if let Ok(mut buffer) = buffer.lock() {
+                            buffer.push_str(&text);
+                            let _ = render_active_turn_input(&buffer);
+                        }
                     }
-                }
+                    _ => {}
+                },
                 Ok(false) => {}
                 Err(_) => break,
             }
         }
     })
+}
+
+fn render_active_turn_input(input: &str) -> anyhow::Result<()> {
+    execute!(
+        std::io::stdout(),
+        MoveToColumn(0),
+        Clear(ClearType::CurrentLine),
+        SetForegroundColor(VY_VIOLET),
+        Print("steer> "),
+        SetForegroundColor(VY_TECH_STRONG),
+        Print(truncate_display(input, terminal_width().saturating_sub(8))),
+        ResetColor
+    )?;
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
+fn clear_active_turn_input() -> anyhow::Result<()> {
+    execute!(
+        std::io::stdout(),
+        MoveToColumn(0),
+        Clear(ClearType::CurrentLine)
+    )?;
+    std::io::stdout().flush()?;
+    Ok(())
 }
 
 fn select_clarification_option(
@@ -2009,29 +2306,37 @@ struct Spinner {
 }
 
 impl Spinner {
-    fn start(label: impl Into<String>) -> Self {
+    fn start(label: impl Into<String>, active_input: Arc<Mutex<String>>) -> Self {
         let label = label.into();
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let handle = thread::spawn(move || {
-            let frames = ["|", "/", "-", "\\"];
+            let frames = ["·", "•", "●", "•"];
             let mut idx = 0;
             let started = Instant::now();
             while !thread_stop.load(Ordering::Relaxed) {
                 let elapsed = started.elapsed().as_secs().max(1);
-                let _ = execute!(
-                    std::io::stdout(),
-                    MoveToColumn(0),
-                    Clear(ClearType::CurrentLine),
-                    SetForegroundColor(VY_TEXT_DIM),
-                    Print(format!(
-                        "{} Working ({}s • esc to interrupt) - {}",
-                        frames[idx % frames.len()],
-                        elapsed,
-                        label
-                    )),
-                    ResetColor
-                );
+                let input = active_input
+                    .lock()
+                    .map(|input| input.clone())
+                    .unwrap_or_default();
+                if input.is_empty() {
+                    let _ = execute!(
+                        std::io::stdout(),
+                        MoveToColumn(0),
+                        Clear(ClearType::CurrentLine),
+                        SetForegroundColor(VY_VIOLET),
+                        Print(frames[idx % frames.len()]),
+                        SetForegroundColor(VY_TEXT_MUTED),
+                        Print(format!(
+                            " working ({}s · type + enter to steer · esc to interrupt) — {}",
+                            elapsed, label
+                        )),
+                        ResetColor
+                    );
+                } else {
+                    let _ = render_active_turn_input(&input);
+                }
                 let _ = std::io::stdout().flush();
                 idx += 1;
                 thread::sleep(Duration::from_millis(100));
@@ -2614,6 +2919,7 @@ fn render_composer(
             Print(command.description)
         )?;
     }
+    let palette_rows = palette.len();
     execute!(
         stdout,
         ResetColor,
@@ -2623,7 +2929,7 @@ fn render_composer(
         SetForegroundColor(VY_TEXT_DIM),
         Print(status),
         ResetColor,
-        MoveUp((2 + palette.len()) as u16),
+        MoveUp((2 + palette_rows) as u16),
         MoveToColumn((2 + input.chars().count()) as u16)
     )?;
     stdout.flush()?;
@@ -2655,13 +2961,13 @@ fn print_welcome(app: &App) -> anyhow::Result<()> {
     let width = terminal_width().clamp(56, 78);
     let border = "-".repeat(width.saturating_sub(2));
     print_welcome_line(format!("+{border}+").with(STEEL_BLUE))?;
-    print_welcome_line(banner_line(" __     __ __   __ ____  _   _ ", width).with(STEEL_BLUE))?;
+    print_welcome_line(banner_line(" __     __ __   __ ____  _   _ ", width).with(VY_VIOLET))?;
     print_welcome_line(
-        banner_line(" \\ \\   / / \\ \\ / /|  _ \\| \\ | |", width).with(STEEL_BLUE),
+        banner_line(" \\ \\   / / \\ \\ / /|  _ \\| \\ | |", width).with(VY_VIOLET),
     )?;
-    print_welcome_line(banner_line("  \\ \\ / /   \\ V / | |_) |  \\| |", width).with(STEEL_BLUE))?;
-    print_welcome_line(banner_line("   \\ V /     | |  |  _ <| |\\  |", width).with(STEEL_BLUE))?;
-    print_welcome_line(banner_line("    \\_/      |_|  |_| \\_\\_| \\_|", width).with(STEEL_BLUE))?;
+    print_welcome_line(banner_line("  \\ \\ / /   \\ V / | |_) |  \\| |", width).with(VY_VIOLET))?;
+    print_welcome_line(banner_line("   \\ V /     | |  |  _ <| |\\  |", width).with(VY_VIOLET))?;
+    print_welcome_line(banner_line("    \\_/      |_|  |_| \\_\\_| \\_|", width).with(VY_VIOLET))?;
     print_welcome_line(format!("+{border}+").with(STEEL_BLUE))?;
     print_welcome_line(format!(
         "{} {}  {}",
@@ -3077,6 +3383,19 @@ fn print_system_block(text: &str) -> anyhow::Result<()> {
     print_spacer()
 }
 
+fn print_steering_block(text: &str) -> anyhow::Result<()> {
+    for line in text.lines() {
+        print_block_line(
+            "steer",
+            line,
+            GRAPHITE_SURFACE_RAISED,
+            VY_VIOLET,
+            VY_TECH_STRONG,
+        )?;
+    }
+    print_spacer()
+}
+
 fn print_error_block(text: &str) -> anyhow::Result<()> {
     for line in text.lines() {
         print_block_line(
@@ -3197,6 +3516,19 @@ fn exchange_user_input(text: &str, image_count: usize) -> String {
     } else {
         format!("{text}\n[attached images: {image_count}]")
     }
+}
+
+fn exchange_user_input_with_steering(
+    text: &str,
+    image_count: usize,
+    steering_inputs: &[String],
+) -> String {
+    let mut combined = exchange_user_input(text, image_count);
+    for steering in steering_inputs {
+        combined.push_str("\nlive steering: ");
+        combined.push_str(steering);
+    }
+    combined
 }
 
 fn first_non_empty_line(value: &str) -> Option<&str> {

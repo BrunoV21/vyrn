@@ -9,6 +9,7 @@ use crate::llm::{ChatCompletionRequest, LlmError, OpenAiClient};
 pub struct ContextManager {
     summary: Option<String>,
     previous_exchange: Option<Exchange>,
+    session_goal: Option<String>,
     raw_history_tokens: usize,
     configured_aggressiveness: SummaryAggressiveness,
     max_tokens: usize,
@@ -19,6 +20,7 @@ impl ContextManager {
         Self {
             summary: None,
             previous_exchange: None,
+            session_goal: None,
             raw_history_tokens: 0,
             configured_aggressiveness,
             max_tokens,
@@ -37,7 +39,44 @@ impl ContextManager {
         self.raw_history_tokens
     }
 
+    pub fn begin_turn(&mut self, user_input: &str) {
+        if self.session_goal.is_none() && !user_input.trim().is_empty() {
+            self.session_goal = Some(crate::agent::transcript::truncate(user_input.trim(), 1600));
+        }
+    }
+
+    pub fn prompt_memory(&self) -> Option<String> {
+        if self.summary.is_none() && self.previous_exchange.is_none() {
+            return None;
+        }
+
+        let mut sections = Vec::new();
+        if let Some(goal) = self.session_goal.as_deref() {
+            sections.push(format!("session goal (verbatim):\n{goal}"));
+        }
+        if let Some(summary) = self
+            .summary
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            sections.push(format!("rolling summary:\n{}", summary.trim()));
+        }
+        if let Some(exchange) = &self.previous_exchange {
+            sections.push(format!(
+                "most recent exchange (verbatim anchor):\n{}",
+                crate::agent::transcript::truncate(&exchange.compact(false), 3600).trim()
+            ));
+        }
+        (!sections.is_empty()).then(|| sections.join("\n\n"))
+    }
+
     pub fn set_previous_exchange(&mut self, exchange: Exchange) {
+        if self.session_goal.is_none() && !exchange.user_input.trim().is_empty() {
+            self.session_goal = Some(crate::agent::transcript::truncate(
+                exchange.user_input.trim(),
+                1600,
+            ));
+        }
         self.raw_history_tokens += estimate_text_tokens(&exchange.compact(true));
         self.previous_exchange = Some(exchange);
     }
@@ -45,6 +84,7 @@ impl ContextManager {
     pub fn clear(&mut self) {
         self.summary = None;
         self.previous_exchange = None;
+        self.session_goal = None;
         self.raw_history_tokens = 0;
     }
 
@@ -123,7 +163,9 @@ impl ContextManager {
             .map(|usage| usage.completion_tokens)
             .filter(|tokens| *tokens > 0)
             .unwrap_or(estimated_output_tokens);
-        self.summary = Some(summary.trim().to_string());
+        if !summary.trim().is_empty() {
+            self.summary = Some(summary.trim().to_string());
+        }
         Ok(Some(SummaryRefreshUsage {
             input_tokens,
             output_tokens,
