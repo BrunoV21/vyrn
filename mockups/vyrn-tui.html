@@ -1,0 +1,1176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>VYRN — TUI mockup v7</title>
+<style>
+:root{
+  --bg:#071019;
+  --row:#0b141d;
+  --line:#1a2a37;
+  --line2:#233746;
+  --text:#cfd9e2;
+  --muted:#6f8292;
+  --muted2:#536777;
+  --accent:#9a7bff;
+  --cyan:#61d4cf;
+  --green:#7ad59a;
+  --amber:#dfb865;
+  --red:#e27e86;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  background:var(--bg);
+  color:var(--text);
+  font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;
+  overflow:hidden;
+}
+button,textarea,select{font:inherit}
+button,select{color:inherit}
+
+.app{
+  height:100%;
+  min-width:760px;
+  display:grid;
+  grid-template-rows:auto auto auto 1fr auto auto auto;
+}
+
+.topline{
+  min-height:38px;
+  border-bottom:1px solid var(--line);
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:0 12px;
+  background:#08121a;
+}
+.brandBox{
+  display:inline-flex;
+  align-items:center;
+  height:24px;
+  padding:0 10px;
+  border:1px solid rgba(154,123,255,.92);
+  color:var(--accent);
+  font-weight:800;
+  letter-spacing:.18em;
+  box-shadow:inset 0 0 0 1px rgba(154,123,255,.08);
+}
+.sep{color:#2a3a48}
+.statusDot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 10px rgba(122,213,154,.4)}
+.cwd{color:#93a4b2}
+.cwd b{color:#c9d3dc;font-weight:500}
+.topline .grow{flex:1}
+select{
+  background:transparent;
+  border:0;
+  outline:0;
+  color:#9badbb;
+  cursor:pointer;
+}
+.topbtn{
+  border:0;
+  background:transparent;
+  color:var(--muted);
+  cursor:pointer;
+  padding:3px 5px;
+  position:relative;
+}
+.topbtn:hover{color:var(--text)}
+.shortcutTag{
+  display:none;
+  position:absolute;
+  top:-13px;
+  right:0;
+  color:#96a7b5;
+  font-size:10px;
+  background:#0b161f;
+  border:1px solid var(--line2);
+  padding:0 4px;
+}
+body.showShortcuts .shortcutTag{display:block}
+.toggleBtn{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  padding:2px 0;
+}
+.toggleLabel{color:#93a4b2}
+.switch{
+  width:34px;height:18px;border:1px solid var(--line2);background:#13202a;position:relative;display:inline-block;
+}
+.switch i{
+  position:absolute;top:1px;left:1px;width:14px;height:14px;background:var(--accent);transition:.16s ease;
+}
+.toggleBtn.off .switch i{transform:translateX(16px);background:#5a6f80}
+.toggleBtn.off .toggleLabel{color:#718494}
+
+.debugBadge{
+  display:inline-flex;
+  align-items:center;
+  gap:7px;
+  color:#9aabb8;
+  position:relative;
+}
+.debugPill{
+  height:18px;
+  display:inline-flex;
+  align-items:center;
+  padding:0 6px;
+  border:1px solid rgba(223,184,101,.5);
+  color:var(--amber);
+}
+.debugPath{color:#738797}
+.debugDot{
+  width:6px;height:6px;background:var(--amber);display:inline-block;
+  box-shadow:0 0 8px rgba(223,184,101,.35);
+}
+
+.contextStrip{
+  border-bottom:1px solid var(--line);
+  background:#08121a;
+  padding:7px 12px 8px;
+}
+.contextMeta{
+  display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px;margin-bottom:5px;
+}
+.contextMeta b{color:#a8b7c4;font-weight:500}
+.contextMeta .grow{flex:1}
+.contextBar{
+  width:100%;height:5px;display:flex;overflow:hidden;background:#13202a;
+}
+.contextBar span{height:100%;transition:.3s ease}
+.segSystem{background:#4f6474}
+.segHistory{background:var(--cyan)}
+.segScratch{background:var(--accent)}
+.segFree{background:#13202a;flex:1}
+
+.inspectStrip{
+  min-height:32px;
+  border-bottom:1px solid var(--line);
+  background:#08121a;
+  display:flex;
+  align-items:center;
+  gap:7px;
+  padding:5px 12px;
+  overflow:auto;
+}
+.inspectStrip::-webkit-scrollbar{height:6px}
+.inspectStrip::-webkit-scrollbar-thumb{background:#172736}
+.inspectLabel{color:#5f7484;white-space:nowrap}
+.inspectBtn{
+  border:1px solid var(--line);
+  background:transparent;
+  color:#8397a6;
+  padding:3px 7px;
+  cursor:pointer;
+  white-space:nowrap;
+  position:relative;
+}
+.inspectBtn:hover{color:#d5dee6;border-color:#314656}
+.inspectBtn.current{color:#c4d1db}
+body.showShortcuts .inspectBtn .shortcutTag{display:block; top:-12px; right:auto; left:0}
+
+.inspector{
+  display:none;
+  border-bottom:1px solid var(--line);
+  background:#09131b;
+}
+.inspector.open{display:block}
+.inspectorHead{
+  min-height:30px;
+  display:flex;
+  align-items:center;
+  gap:9px;
+  padding:0 12px;
+  border-bottom:1px solid var(--line);
+  color:#8397a7;
+}
+.inspectorHead b{color:#c7d1db;font-weight:500}
+.inspectorHead .grow{flex:1}
+.inspectorClose{
+  border:0;background:transparent;color:#738898;cursor:pointer;
+}
+.inspectorClose:hover{color:#d6dfe8}
+.inspectorBody{
+  padding:10px 12px;
+  color:#a1b3bf;
+  max-height:190px;
+  overflow:auto;
+}
+.inspectorBody pre{
+  margin:0;
+  white-space:pre-wrap;
+  color:#a1b3bf;
+}
+.inspectorList{
+  display:grid;
+  grid-template-columns:115px 1fr;
+  gap:4px 12px;
+  font-size:11px;
+}
+.inspectorList b{color:#c2ced8;font-weight:500}
+
+.transcript{
+  overflow:auto;
+  padding:10px 0 24px;
+  scroll-behavior:smooth;
+}
+.transcript::-webkit-scrollbar{width:8px}
+.transcript::-webkit-scrollbar-thumb{background:#1a2a37}
+.turn{margin:0}
+.userline{
+  display:grid;
+  grid-template-columns:18px 1fr;
+  gap:7px;
+  padding:7px 14px;
+  background:#0a141d;
+  border-top:1px solid rgba(255,255,255,.015);
+  border-bottom:1px solid rgba(255,255,255,.015);
+}
+.promptMark{color:var(--cyan);font-weight:700}
+.usertext{color:#d6e0e7;white-space:pre-wrap}
+.assistant{padding:8px 14px 12px 39px}
+.answer{white-space:pre-wrap;color:#bdcad4;padding-top:4px}
+.answer code{
+  color:#d2dbe3;background:#0c1720;border:1px solid var(--line);padding:1px 4px;
+}
+.trace{
+  margin:5px 0 7px;border-left:1px solid #233645;
+}
+.traceLine{
+  position:relative;padding:4px 8px 4px 14px;color:#8497a7;font-size:12px;
+}
+.traceLine:before{
+  content:"";position:absolute;left:-4px;top:10px;width:7px;height:7px;border-radius:50%;background:#41596a;
+}
+.traceLine.live:before{background:var(--accent);box-shadow:0 0 9px rgba(154,123,255,.55)}
+.traceLine.ok:before{background:var(--green)}
+.traceTag{color:#607789}
+
+.tool{
+  margin:6px 0;
+  border-top:1px solid var(--line);
+  border-bottom:1px solid var(--line);
+  background:#09131b;
+}
+.tool summary{
+  list-style:none;
+  display:grid;
+  grid-template-columns:18px 68px minmax(0,1fr) auto auto;
+  gap:8px;
+  align-items:center;
+  padding:6px 10px;
+  cursor:pointer;
+  color:#9aabb8;
+  user-select:none;
+}
+.tool summary::-webkit-details-marker{display:none}
+.tool summary:hover{background:#0c1720}
+.chev{color:#617585;transition:transform .14s ease}
+.tool[open] .chev{transform:rotate(90deg);color:var(--accent)}
+.toolName{color:#8f7be1}
+.toolCmd{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:#b5c3ce}
+.toolMeta{color:#5d7181;font-size:11px}
+.toolState{font-size:11px;color:var(--green)}
+.toolBody{
+  border-top:1px solid var(--line);
+  padding:8px 10px 10px 36px;
+  background:#08121a;
+}
+.toolGrid{
+  display:grid;
+  grid-template-columns:86px 1fr;
+  gap:4px 12px;
+  color:#738797;
+  font-size:11px;
+  margin-bottom:8px;
+}
+.toolGrid b{color:#9eb0bd;font-weight:500}
+.stdout{
+  border:1px solid var(--line);
+  background:#071018;
+  padding:8px 9px;
+  white-space:pre-wrap;
+  overflow:auto;
+  color:#a8bac7;
+  max-height:180px;
+}
+.stdout strong{color:var(--green)}
+.toolActions{display:flex;gap:8px;margin-top:7px;flex-wrap:wrap}
+.mini{
+  border:1px solid var(--line);
+  background:transparent;
+  color:#718696;
+  padding:3px 6px;
+  cursor:pointer;
+  font-size:10px;
+}
+.mini:hover{color:#c5d0d9;border-color:#304655}
+
+.thinking{
+  display:inline-flex;gap:5px;align-items:center;color:#7d6bd1;font-size:12px;padding:4px 0;
+}
+.thinking i{
+  width:4px;height:4px;border-radius:50%;background:currentColor;animation:pulse 1s infinite;
+}
+.thinking i:nth-child(2){animation-delay:.14s}
+.thinking i:nth-child(3){animation-delay:.28s}
+@keyframes pulse{
+  0%,80%,100%{opacity:.2;transform:translateY(0)}
+  40%{opacity:1;transform:translateY(-2px)}
+}
+
+.loadingCard{
+  margin:8px 0 0;
+  border:1px solid var(--line);
+  background:#08131b;
+  padding:10px 11px;
+}
+.loadingHead{
+  display:flex;align-items:center;gap:9px;color:#93a6b4;font-size:12px;margin-bottom:8px;
+}
+.loadingHead b{color:#c8d2db;font-weight:500}
+.loaderBox{
+  display:grid;
+  gap:6px;
+}
+.loaderLine{
+  height:8px;
+  background:linear-gradient(90deg,#0e1a24 0%, #172635 50%, #0e1a24 100%);
+  background-size:200% 100%;
+  animation:shimmer 1.1s linear infinite;
+}
+.loaderLine.w1{width:78%}
+.loaderLine.w2{width:63%}
+.loaderLine.w3{width:46%}
+@keyframes shimmer{
+  0%{background-position:200% 0}
+  100%{background-position:-200% 0}
+}
+.loaderNote{color:#637888;font-size:11px;margin-top:8px}
+
+.commandPalette{
+  position:absolute;
+  left:0;right:0;
+  bottom:76px;
+  max-height:260px;
+  overflow:auto;
+  background:#0a141d;
+  border-top:1px solid var(--line2);
+  border-bottom:1px solid var(--line2);
+  display:none;
+  z-index:3;
+}
+.commandPalette.show{display:block}
+.command{
+  display:grid;
+  grid-template-columns:98px 1fr auto;
+  gap:10px;
+  padding:7px 14px 7px 38px;
+  cursor:pointer;
+}
+.command:hover,.command.active{background:#101c26}
+.command code{color:#a78cff}
+.command span{color:#7d91a1}
+.command small{color:#526675}
+
+.composer{
+  position:relative;
+  border-top:1px solid var(--line2);
+  background:#08121a;
+}
+.inputRow{
+  display:grid;
+  grid-template-columns:22px 1fr auto;
+  align-items:end;
+  gap:6px;
+  padding:8px 12px 7px;
+}
+.inputMark{
+  color:var(--cyan);
+  padding:8px 0 0;
+  align-self:start;
+  font-weight:700;
+}
+textarea{
+  resize:none;
+  width:100%;
+  min-height:38px;
+  max-height:130px;
+  border:0;
+  outline:0;
+  background:transparent;
+  color:var(--text);
+  padding:7px 0 5px;
+}
+textarea::placeholder{color:#496071}
+.send{
+  align-self:center;
+  width:28px;height:28px;
+  border:1px solid var(--line2);
+  background:#0c1821;
+  color:#8195a5;
+  cursor:pointer;
+}
+.send:hover{color:var(--text);border-color:#375064}
+.send:disabled{opacity:.4;cursor:not-allowed}
+.hints{
+  display:flex;
+  align-items:center;
+  gap:12px;
+  color:#526777;
+  font-size:10px;
+  padding:0 12px 7px 40px;
+}
+.hints .grow{flex:1}
+.hints button{
+  border:0;background:transparent;color:#64798a;cursor:pointer;padding:0
+}
+.hints button:hover{color:#b9c6d0}
+
+.footer{
+  border-top:1px solid var(--line);
+  display:flex;
+  gap:10px;
+  align-items:center;
+  min-height:27px;
+  padding:0 12px;
+  background:#071019;
+  color:#5e7383;
+  font-size:10px;
+}
+.footer .grow{flex:1}
+.footer b{color:#8296a6;font-weight:500}
+.toast{
+  position:fixed;
+  right:10px;bottom:36px;
+  border:1px solid var(--line2);
+  background:#0b161f;
+  color:#8ea1b0;
+  padding:6px 8px;
+  font-size:11px;
+  opacity:0;
+  transform:translateY(4px);
+  pointer-events:none;
+  transition:.15s ease;
+}
+.toast.show{opacity:1;transform:translateY(0)}
+
+body.hideTools .tool{display:none}
+body.hideTools .assistant{padding-top:6px}
+
+.inspectToggle{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+}
+.inspectToggle .inspectChevron{
+  color:var(--accent);
+  transition:transform .15s ease;
+}
+.inspectToggle.collapsed .inspectChevron{
+  transform:rotate(-90deg);
+  color:#667b8b;
+}
+body.hideInspect .inspectStrip,
+body.hideInspect .inspector{
+  display:none !important;
+}
+
+@media(max-width:900px){
+  .app{min-width:0}
+  .tool summary{grid-template-columns:16px 58px minmax(0,1fr) auto}
+  .toolMeta{display:none}
+  .debugPath{display:none}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topline">
+    <span class="brandBox">VYRN</span>
+    <span class="sep">│</span>
+    <span class="statusDot"></span>
+    <span class="cwd">cwd <b id="cwdLabel">~/vyrn</b></span>
+    <span class="sep">│</span>
+    <select id="modelSel" title="model">
+      <option>glm-5.2</option>
+      <option>glm-5v-turbo</option>
+      <option>qwen3-coder</option>
+      <option>claude-sonnet</option>
+    </select>
+    <span class="sep">│</span>
+    <span class="debugBadge" title="launched with debug">
+      <span class="debugPill"><span class="debugDot"></span>&nbsp;debug</span>
+      <span class="debugPath" id="debugPath">/tmp/vyrn-debug.log</span>
+    </span>
+    <div class="grow"></div>
+    <button class="topbtn toggleBtn" id="toolToggleBtn" aria-pressed="true" title="Toggle trace visibility">
+      <span class="toggleLabel">trace</span>
+      <span class="switch"><i></i></span>
+      <span class="shortcutTag">⌥T</span>
+    </button>
+    <span class="sep">│</span>
+    <button class="topbtn inspectToggle" id="inspectToggleBtn" aria-expanded="true" title="Show or hide inspect controls">
+      <span class="inspectChevron">⌄</span><span>inspect</span><span class="shortcutTag">⌥E</span>
+    </button>
+    <span class="sep">│</span>
+    <button class="topbtn" id="clearBtn">clear<span class="shortcutTag">⌥C</span></button>
+  </div>
+
+  <div class="contextStrip">
+    <div class="contextMeta">
+      <span>context</span>
+      <b id="ctxCount">1,009 / 4,096</b>
+      <span class="sep">│</span>
+      <span>system <b id="sysCount">244</b></span>
+      <span>history <b id="histCount">701</b></span>
+      <span>scratch <b id="scratchCount">64</b></span>
+      <div class="grow"></div>
+      <span>available <b id="availCount">3,087</b></span>
+    </div>
+    <div class="contextBar" title="system / history / scratch / free">
+      <span class="segSystem" id="segSystem"></span>
+      <span class="segHistory" id="segHistory"></span>
+      <span class="segScratch" id="segScratch"></span>
+      <span class="segFree"></span>
+    </div>
+  </div>
+
+  <div class="inspectStrip">
+    <span class="inspectLabel">inspect</span>
+    <button class="inspectBtn" data-inspect="help">/help<span class="shortcutTag">⌥H</span></button>
+    <button class="inspectBtn" data-inspect="stats">/stats<span class="shortcutTag">⌥S</span></button>
+    <button class="inspectBtn" data-inspect="context">/context<span class="shortcutTag">⌥K</span></button>
+    <button class="inspectBtn current" data-inspect="scratchpad">/scratchpad<span class="shortcutTag">⌥P</span></button>
+    <button class="inspectBtn" data-inspect="manifest">/manifest<span class="shortcutTag">⌥I</span></button>
+    <button class="inspectBtn" data-inspect="skills">/skills<span class="shortcutTag">⌥L</span></button>
+    <button class="inspectBtn" data-inspect="debug">/debug<span class="shortcutTag">⌥D</span></button>
+    <button class="inspectBtn" data-inspect="models">/models</button>
+    <button class="inspectBtn" data-inspect="refresh">/refresh</button>
+    <button class="inspectBtn" data-inspect="exit">/exit</button>
+  </div>
+
+  <div class="inspector" id="inspector">
+    <div class="inspectorHead">
+      <span>inspect</span>
+      <b id="inspectorTitle">scratchpad</b>
+      <div class="grow"></div>
+      <span id="inspectorMeta">last turn</span>
+      <button class="inspectorClose" id="inspectorClose">close</button>
+    </div>
+    <div class="inspectorBody" id="inspectorBody"></div>
+  </div>
+
+  <div class="transcript" id="transcript">
+    <div class="turn" data-turn="1">
+      <div class="userline">
+        <span class="promptMark">›</span>
+        <span class="usertext">run the tests and tell me only what matters</span>
+      </div>
+      <div class="assistant">
+        <div class="trace">
+          <div class="traceLine ok"><span class="traceTag">plan</span> smallest useful check → test suite</div>
+        </div>
+
+        <details class="tool">
+          <summary>
+            <span class="chev">›</span>
+            <span class="toolName">tool.shell</span>
+            <span class="toolCmd">cargo test -q</span>
+            <span class="toolMeta">0.72s</span>
+            <span class="toolState">ok</span>
+          </summary>
+          <div class="toolBody">
+            <div class="toolGrid">
+              <span>cwd</span><b>~/vyrn</b>
+              <span>command</span><b>cargo test -q</b>
+              <span>exit</span><b>0</b>
+              <span>duration</span><b>721 ms</b>
+              <span>tokens kept</span><b>18</b>
+            </div>
+            <div class="stdout"><strong>18 passed</strong> · 0 failed · 0 ignored</div>
+            <div class="toolActions">
+              <button class="mini" onclick="copyText('cargo test -q')">copy command</button>
+              <button class="mini" onclick="openScratchpad(1)">scratchpad</button>
+              <button class="mini" onclick="notify('full raw output would open here')">raw output</button>
+            </div>
+          </div>
+        </details>
+
+        <div class="answer">18 tests passed. No failures.</div>
+      </div>
+    </div>
+
+    <div class="turn" data-turn="2">
+      <div class="userline">
+        <span class="promptMark">›</span>
+        <span class="usertext">what's the weather today in lisbon?</span>
+      </div>
+      <div class="assistant">
+        <details class="tool">
+          <summary>
+            <span class="chev">›</span>
+            <span class="toolName">tool.net</span>
+            <span class="toolCmd">curl -s 'wttr.in/Lisbon?format=3'</span>
+            <span class="toolMeta">0.38s</span>
+            <span class="toolState">ok</span>
+          </summary>
+          <div class="toolBody">
+            <div class="toolGrid">
+              <span>request</span><b>GET wttr.in/Lisbon?format=3</b>
+              <span>status</span><b>200</b>
+              <span>duration</span><b>382 ms</b>
+              <span>retained</span><b>1 fact</b>
+            </div>
+            <div class="stdout"><strong>Lisbon:</strong> ☀ +22°C</div>
+            <div class="toolActions">
+              <button class="mini" onclick="copyText(`curl -s 'wttr.in/Lisbon?format=3'`)">copy command</button>
+              <button class="mini" onclick="openScratchpad(2)">scratchpad</button>
+              <button class="mini" onclick="notify('request headers would open here')">headers</button>
+            </div>
+          </div>
+        </details>
+        <div class="answer">Lisbon is looking sunny today — ☀ +22°C. Nice and pleasant!</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="composer">
+    <div class="commandPalette" id="palette">
+      <div class="command" data-command="/help"><code>/help</code><span>list commands and keyboard controls</span><small>↵</small></div>
+      <div class="command" data-command="/stats"><code>/stats</code><span>provider usage, estimates, and savings</span><small>↵</small></div>
+      <div class="command" data-command="/context"><code>/context</code><span>context used, available, and retained</span><small>↵</small></div>
+      <div class="command" data-command="/scratchpad"><code>/scratchpad</code><span>show the last evolving turn scratchpad</span><small>↵</small></div>
+      <div class="command" data-command="/models"><code>/models</code><span>switch model profile (/model alias)</span><small>↵</small></div>
+      <div class="command" data-command="/model"><code>/model</code><span>alias for /models</span><small>↵</small></div>
+      <div class="command" data-command="/manifest"><code>/manifest</code><span>show the compact machine manifest</span><small>↵</small></div>
+      <div class="command" data-command="/refresh"><code>/refresh</code><span>rescan the machine manifest</span><small>↵</small></div>
+      <div class="command" data-command="/skills"><code>/skills</code><span>list discovered skill sources</span><small>↵</small></div>
+      <div class="command" data-command="/debug"><code>/debug</code><span>show debug trace status and path</span><small>↵</small></div>
+      <div class="command" data-command="/clear"><code>/clear</code><span>reset context, scratchpad, and token stats</span><small>↵</small></div>
+      <div class="command" data-command="/exit"><code>/exit</code><span>exit vyrn</span><small>↵</small></div>
+    </div>
+    <div class="inputRow">
+      <span class="inputMark">›</span>
+      <textarea id="input" rows="1" placeholder="message vyrn…  / for commands"></textarea>
+      <button class="send" id="sendBtn">↵</button>
+    </div>
+    <div class="hints">
+      <span>enter send</span>
+      <span>shift+enter newline</span>
+      <span>⌘/ctrl+k commands</span>
+      <span>hold ⌥ to reveal shortcuts</span>
+      <span class="grow"></span>
+      <button id="demoShell">simulate shell</button>
+      <span class="sep">│</span>
+      <button id="demoNet">simulate net</button>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span>turns <b id="turns">2</b></span>
+    <span>spent <b id="spent">4,487t</b></span>
+    <span>history saved <b id="saved">0</b></span>
+    <div class="grow"></div>
+    <span>session saved <b id="sessionSaved">0</b></span>
+    <span>tools <b id="tools">2</b></span>
+    <span>last <b id="latency">0.38s</b></span>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const transcript = document.getElementById('transcript');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('sendBtn');
+const palette = document.getElementById('palette');
+const modelSel = document.getElementById('modelSel');
+const toolToggleBtn = document.getElementById('toolToggleBtn');
+const inspectToggleBtn = document.getElementById('inspectToggleBtn');
+
+const ctxCount = document.getElementById('ctxCount');
+const histCount = document.getElementById('histCount');
+const availCount = document.getElementById('availCount');
+const segSystem = document.getElementById('segSystem');
+const segHistory = document.getElementById('segHistory');
+const segScratch = document.getElementById('segScratch');
+
+const turnsEl = document.getElementById('turns');
+const spentEl = document.getElementById('spent');
+const savedEl = document.getElementById('saved');
+const sessionSavedEl = document.getElementById('sessionSaved');
+const toolsEl = document.getElementById('tools');
+const latencyEl = document.getElementById('latency');
+
+const inspector = document.getElementById('inspector');
+const inspectorTitle = document.getElementById('inspectorTitle');
+const inspectorMeta = document.getElementById('inspectorMeta');
+const inspectorBody = document.getElementById('inspectorBody');
+
+let sys=244, hist=701, scratch=64;
+let turns=2, spent=4487, tools=2, busy=false;
+let toolsVisible=true;
+let inspectVisible=true;
+
+const scratchpads = {
+  1: {
+    title: 'scratchpad · turn 1',
+    meta: 'tests',
+    body: `goal: report only what matters
+plan:
+- run the test suite
+- collapse noisy output
+- retain only pass/fail summary
+
+retained:
+- cargo test completed successfully
+- 18 passed, 0 failed`
+  },
+  2: {
+    title: 'scratchpad · turn 2',
+    meta: 'weather',
+    body: `goal: answer the weather request quickly
+plan:
+- hit wttr.in with compact format
+- retain one concise weather fact
+- respond in a friendly tone
+
+retained:
+- Lisbon: ☀ +22°C`
+  }
+};
+
+const inspectData = {
+  help: {
+    title: '/help',
+    meta: 'commands',
+    body: `/help        list commands and keyboard controls
+/stats       provider usage, estimates, and savings
+/context     context used, available, and retained
+/scratchpad  show the last evolving turn scratchpad
+/models      switch model profile (/model alias)
+/model       alias for /models
+/manifest    show the compact machine manifest
+/refresh     rescan the machine manifest
+/skills      list discovered skill sources
+/debug       show debug trace status and path
+/clear       reset context, scratchpad, and token stats
+/exit        exit vyrn`
+  },
+  stats: {
+    title: '/stats',
+    meta: 'session',
+    body: `session spent ${spent.toLocaleString()}
+provider 0
+fallback est. 0
+raw-history would be 0
+history saved 0
+context ${(sys+hist+scratch).toLocaleString()}/4,096
+no completed requests yet`
+  },
+  context: {
+    title: '/context',
+    meta: 'ledger',
+    body: `sys context (estimated): ${(sys+hist+scratch).toLocaleString()}/4096
+sys provider-reported session tokens: 0
+sys rolling summary (estimated): 0
+sys retained scratchpad: ${scratch}
+sys retained history: ${hist}
+available: ${(4096-(sys+hist+scratch)).toLocaleString()}`
+  },
+  manifest: {
+    title: '/manifest',
+    meta: 'machine',
+    body: `sys [machine] macos/aarch64 user=bv-mac shell=zsh
+sys [env] cargo,curl,docker,ffmpeg,git,node,npm,python3,rust
+sys [workspace] cwd=~/vyrn
+sys [debug] enabled path=/tmp/vyrn-debug.log`
+  },
+  skills: {
+    title: '/skills',
+    meta: 'sources',
+    body: `sys skills:
+- shell execution
+- file read/write
+- repo inspection
+- lightweight web fetch
+- tool trace compaction`
+  },
+  debug: {
+    title: '/debug',
+    meta: 'trace',
+    body: `debug: enabled
+path: /tmp/vyrn-debug.log
+trace status: collecting tool events
+retention: current session only`
+  },
+  models: {
+    title: '/models',
+    meta: 'profiles',
+    body: `models
+  glm-5.2      @ https://api.z.ai/api/paas/v4/
+  glm-5v-turbo @ https://api.z.ai/api/paas/v4/
+
+Use ↑/↓ to choose, Enter to select, Esc to cancel.`
+  },
+  refresh: {
+    title: '/refresh',
+    meta: 'machine manifest',
+    body: `rescan complete
+- machine manifest unchanged
+- 7 runtime capabilities available
+- debug path still active`
+  },
+  exit: {
+    title: '/exit',
+    meta: 'session',
+    body: `exit vyrn
+This would terminate the local session.`
+  }
+};
+
+function esc(s){
+  return s.replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
+}
+function notify(text){
+  const t=document.getElementById('toast');
+  t.textContent=text;
+  t.classList.add('show');
+  clearTimeout(notify.timer);
+  notify.timer=setTimeout(()=>t.classList.remove('show'),1300);
+}
+function copyText(text){
+  navigator.clipboard?.writeText(text);
+  notify('copied');
+}
+function scrollBottom(){
+  requestAnimationFrame(()=>transcript.scrollTop=transcript.scrollHeight);
+}
+function updateContext(delta=0){
+  hist=Math.max(0,Math.min(3700,hist+delta));
+  const total=sys+hist+scratch;
+  ctxCount.textContent=`${total.toLocaleString()} / 4,096`;
+  histCount.textContent=hist.toLocaleString();
+  availCount.textContent=(4096-total).toLocaleString();
+  segSystem.style.width=(sys/4096*100)+'%';
+  segHistory.style.width=(hist/4096*100)+'%';
+  segScratch.style.width=(scratch/4096*100)+'%';
+}
+function updateFooter(){
+  turnsEl.textContent=turns;
+  spentEl.textContent=spent.toLocaleString()+'t';
+  toolsEl.textContent=tools;
+  savedEl.textContent='0';
+  sessionSavedEl.textContent='0';
+}
+function updateToolVisibility(){
+  document.body.classList.toggle('hideTools', !toolsVisible);
+  toolToggleBtn.classList.toggle('off', !toolsVisible);
+  toolToggleBtn.setAttribute('aria-pressed', toolsVisible ? 'true' : 'false');
+}
+function updateInspectVisibility(){
+  document.body.classList.toggle('hideInspect', !inspectVisible);
+  inspectToggleBtn.classList.toggle('collapsed', !inspectVisible);
+  inspectToggleBtn.setAttribute('aria-expanded', inspectVisible ? 'true' : 'false');
+}
+function toggleInspect(){
+  inspectVisible = !inspectVisible;
+  updateInspectVisibility();
+  notify(inspectVisible ? 'inspect shown' : 'inspect hidden');
+}
+function cycleModel(){
+  modelSel.selectedIndex=(modelSel.selectedIndex+1)%modelSel.options.length;
+  notify('model → '+modelSel.value);
+}
+function openInspector(title, meta, body){
+  inspectVisible = true;
+  updateInspectVisibility();
+  inspector.classList.add('open');
+  inspectorTitle.textContent=title;
+  inspectorMeta.textContent=meta;
+  inspectorBody.innerHTML='<pre>'+esc(body)+'</pre>';
+}
+function openInspectKey(key){
+  const data=inspectData[key];
+  if(!data) return;
+  document.querySelectorAll('.inspectBtn').forEach(btn => btn.classList.toggle('current', btn.dataset.inspect===key));
+  openInspector(data.title, data.meta, data.body);
+}
+function openScratchpad(turnId){
+  const data=scratchpads[turnId];
+  if(!data) return;
+  document.querySelectorAll('.inspectBtn').forEach(btn => btn.classList.toggle('current', btn.dataset.inspect==='scratchpad'));
+  openInspector(data.title, data.meta, data.body);
+}
+document.getElementById('inspectorClose').onclick=()=>inspector.classList.remove('open');
+
+function toolMarkup(kind, cmd, stdout, duration='0.44s', extra={}, turnId=3){
+  const name=kind==='net'?'tool.net':'tool.shell';
+  const cwd=extra.cwd||'~/vyrn';
+  return `
+  <details class="tool" open>
+    <summary>
+      <span class="chev">›</span>
+      <span class="toolName">${name}</span>
+      <span class="toolCmd">${esc(cmd)}</span>
+      <span class="toolMeta">${duration}</span>
+      <span class="toolState">ok</span>
+    </summary>
+    <div class="toolBody">
+      <div class="toolGrid">
+        <span>${kind==='net'?'request':'cwd'}</span><b>${kind==='net'?esc(extra.request||cmd):esc(cwd)}</b>
+        <span>${kind==='net'?'status':'command'}</span><b>${kind==='net'?'200':esc(cmd)}</b>
+        <span>${kind==='net'?'duration':'exit'}</span><b>${kind==='net'?duration:'0'}</b>
+        <span>${kind==='net'?'retained':'duration'}</span><b>${kind==='net'?'1 compact fact':duration}</b>
+        ${kind==='net'?'':'<span>tokens kept</span><b>18</b>'}
+      </div>
+      <div class="stdout">${stdout}</div>
+      <div class="toolActions">
+        <button class="mini" onclick="copyText(${JSON.stringify(cmd)})">copy command</button>
+        <button class="mini" onclick="openScratchpad(${turnId})">scratchpad</button>
+        <button class="mini" onclick="notify('raw detail view simulated')">raw detail</button>
+      </div>
+    </div>
+  </details>`;
+}
+function appendUser(text){
+  const turnId = Object.keys(scratchpads).length + 1;
+  const turn=document.createElement('div');
+  turn.className='turn';
+  turn.dataset.turn=turnId;
+  turn.innerHTML=`
+    <div class="userline">
+      <span class="promptMark">›</span>
+      <span class="usertext">${esc(text)}</span>
+    </div>
+    <div class="assistant">
+      <div class="thinking"><i></i><i></i><i></i><span>routing</span></div>
+    </div>`;
+  transcript.appendChild(turn);
+  scrollBottom();
+  return {resp: turn.querySelector('.assistant'), turnId};
+}
+function finish(resp, html){
+  resp.innerHTML=html;
+  scrollBottom();
+  busy=false;
+  sendBtn.disabled=false;
+}
+function showLoadingPreview(resp, label='waiting for model', note='non-streaming preview'){
+  resp.innerHTML = `
+    <div class="trace">
+      <div class="traceLine ok"><span class="traceTag">plan</span> compact next action selected</div>
+      <div class="traceLine live"><span class="traceTag">llm</span> ${label}</div>
+    </div>
+    <div class="loadingCard">
+      <div class="loadingHead">
+        <div class="thinking"><i></i><i></i><i></i><span><b>${label}</b></span></div>
+      </div>
+      <div class="loaderBox">
+        <div class="loaderLine w1"></div>
+        <div class="loaderLine w2"></div>
+        <div class="loaderLine w3"></div>
+      </div>
+      <div class="loaderNote">${note} · final response will appear after the simulated delay</div>
+    </div>`;
+  scrollBottom();
+}
+function runCommand(resp, text, turnId){
+  const cmd=text.trim().split(/\s+/)[0];
+  setTimeout(()=>{
+    if(cmd==='/help'){
+      finish(resp, `<div class="answer">Use <code>/</code> or ⌘/ctrl+k for the full command palette.\nHold <code>⌥</code> to reveal shortcuts.\nUse the inspect row for /stats, /context, /scratchpad, /manifest, /skills, and /debug.</div>`);
+      openInspectKey('help');
+    } else if(cmd==='/stats'){ finish(resp, `<div class="answer">stats opened in inspector.</div>`); openInspectKey('stats');
+    } else if(cmd==='/context'){ finish(resp, `<div class="answer">context ledger opened in inspector.</div>`); openInspectKey('context');
+    } else if(cmd==='/scratchpad'){ finish(resp, `<div class="answer">latest scratchpad opened in inspector.</div>`); openScratchpad(Object.keys(scratchpads).length);
+    } else if(cmd==='/manifest'){ finish(resp, `<div class="answer">machine manifest opened in inspector.</div>`); openInspectKey('manifest');
+    } else if(cmd==='/skills'){ finish(resp, `<div class="answer">skills opened in inspector.</div>`); openInspectKey('skills');
+    } else if(cmd==='/debug'){ finish(resp, `<div class="answer">debug status opened in inspector.</div>`); openInspectKey('debug');
+    } else if(cmd==='/models' || cmd==='/model'){ cycleModel(); finish(resp, `<div class="answer">model switched → ${esc(modelSel.value)}</div>`); openInspectKey('models');
+    } else if(cmd==='/refresh'){ finish(resp, `<div class="answer">machine manifest rescanned.</div>`); openInspectKey('refresh');
+    } else if(cmd==='/clear'){ clearSession(); return;
+    } else if(cmd==='/exit'){ finish(resp, `<div class="answer">exit requested (simulation only).</div>`); openInspectKey('exit');
+    } else { finish(resp, `<div class="answer">unknown command ${esc(cmd)} · try <code>/help</code></div>`); }
+    turns++; spent+=90; updateContext(18); updateFooter();
+  },250);
+}
+function simulate(resp, text, forcedKind=null, turnId=3){
+  const low=text.toLowerCase();
+  let kind=forcedKind || 'shell';
+  let cmd='git status --short';
+  let stdout='<strong>clean</strong> · 0 modified files';
+  let answer='Working tree is clean.';
+  let meta={cwd:'~/vyrn'};
+  let scratchBody=`goal: resolve request\nplan:\n- inspect the relevant source\n- preserve only useful output\n- answer concisely`;
+
+  if(forcedKind==='net' || low.includes('weather') || low.includes('lisbon')){
+    kind='net';
+    cmd="curl -s 'wttr.in/Lisbon?format=3'";
+    stdout='<strong>Lisbon:</strong> ☀ +22°C';
+    answer='Lisbon is sunny at about 22°C in this simulation.';
+    meta={request:'GET wttr.in/Lisbon?format=3'};
+    scratchBody=`goal: answer the weather request quickly
+plan:
+- hit wttr.in with compact format
+- retain one concise weather fact
+- respond with only the weather
+retained:
+- Lisbon: ☀ +22°C`;
+  } else if(low.includes('test')){
+    cmd='cargo test -q';
+    stdout='<strong>18 passed</strong> · 0 failed · 0 ignored';
+    answer='18 tests passed. No failures.';
+    scratchBody=`goal: report only what matters
+plan:
+- run the test suite
+- collapse noisy output
+- return pass/fail only
+retained:
+- 18 passed, 0 failed`;
+  } else if(low.includes('context') || low.includes('token')){
+    cmd='vyrn context --estimate';
+    stdout=`<strong>${(sys+hist+scratch).toLocaleString()}t active</strong> · ${(4096-sys-hist-scratch).toLocaleString()}t free`;
+    answer='The context strip above is the primary window-pressure indicator.';
+    scratchBody=`goal: explain token pressure
+plan:
+- inspect current ledger values
+- return active and free tokens
+retained:
+- context figures above are canonical`;
+  } else if(low.includes('manifest') || low.includes('machine')){
+    cmd='vyrn manifest --compact';
+    stdout='<strong>machine:</strong> macos/aarch64 · shell=zsh · env=cargo,curl,git,node,python3,rust';
+    answer='The compact machine manifest shows a local macOS arm64 environment with the main CLI/dev tools available.';
+    scratchBody=`goal: summarize the machine manifest
+plan:
+- query compact manifest
+- keep machine + env only
+retained:
+- macos/aarch64
+- cargo,curl,git,node,python3,rust`;
+  }
+
+  scratchpads[turnId] = {
+    title: `scratchpad · turn ${turnId}`,
+    meta: 'current',
+    body: scratchBody
+  };
+
+  const start=performance.now();
+  resp.innerHTML=`
+    <div class="trace">
+      <div class="traceLine ok"><span class="traceTag">plan</span> smallest useful action</div>
+      <div class="traceLine live"><span class="traceTag">exec</span> ${esc(cmd)}</div>
+    </div>`;
+  scrollBottom();
+
+  setTimeout(()=>{
+    showLoadingPreview(resp, 'waiting for model', 'tool finished; composing final answer');
+    setTimeout(()=>{
+      const duration=((performance.now()-start)/1000).toFixed(2)+'s';
+      finish(resp,
+        toolMarkup(kind,cmd,stdout,duration,meta,turnId)+
+        `<div class="answer">${answer}</div>`
+      );
+      tools++;
+      turns++;
+      spent+=310+Math.floor(Math.random()*180);
+      updateContext(96+Math.floor(Math.random()*60));
+      updateFooter();
+      latencyEl.textContent=duration;
+      openScratchpad(turnId);
+    }, 1200);
+  },700);
+}
+function send(text=input.value.trim(), forcedKind=null){
+  if(!text || busy)return;
+  busy=true;
+  sendBtn.disabled=true;
+  input.value='';
+  input.style.height='auto';
+  palette.classList.remove('show');
+  const {resp, turnId}=appendUser(text);
+  if(text.startsWith('/')) runCommand(resp,text,turnId);
+  else simulate(resp,text,forcedKind,turnId);
+}
+function clearSession(){
+  [...transcript.querySelectorAll('.turn')].forEach(n=>n.remove());
+  hist=0; scratch=64; turns=0; spent=0; tools=0;
+  updateContext(0); updateFooter();
+  busy=false; sendBtn.disabled=false;
+  notify('session cleared');
+}
+
+input.addEventListener('input',()=>{
+  input.style.height='auto';
+  input.style.height=Math.min(input.scrollHeight,130)+'px';
+  if(input.value.startsWith('/')) palette.classList.add('show');
+  else palette.classList.remove('show');
+});
+input.addEventListener('keydown',e=>{
+  if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); }
+  if(e.key==='Escape') palette.classList.remove('show');
+});
+document.addEventListener('keydown',e=>{
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){
+    e.preventDefault(); input.focus(); palette.classList.toggle('show');
+  }
+  if(e.key === 'Alt') document.body.classList.add('showShortcuts');
+  if(e.altKey){
+    const k = e.key.toLowerCase();
+    if(k==='t'){ e.preventDefault(); toolsVisible=!toolsVisible; updateToolVisibility(); notify(toolsVisible?'trace enabled':'trace hidden'); }
+    if(k==='e'){ e.preventDefault(); toggleInspect(); }
+    if(k==='m'){ e.preventDefault(); cycleModel(); }
+    if(k==='c'){ e.preventDefault(); clearSession(); }
+    if(k==='h'){ e.preventDefault(); openInspectKey('help'); }
+    if(k==='s'){ e.preventDefault(); openInspectKey('stats'); }
+    if(k==='k'){ e.preventDefault(); openInspectKey('context'); }
+    if(k==='p'){ e.preventDefault(); openScratchpad(Object.keys(scratchpads).length); }
+    if(k==='i'){ e.preventDefault(); openInspectKey('manifest'); }
+    if(k==='l'){ e.preventDefault(); openInspectKey('skills'); }
+    if(k==='d'){ e.preventDefault(); openInspectKey('debug'); }
+  }
+});
+document.addEventListener('keyup',e=>{
+  if(e.key === 'Alt') document.body.classList.remove('showShortcuts');
+});
+sendBtn.onclick=()=>send();
+document.getElementById('demoShell').onclick=()=>send('run the tests and report only what matters','shell');
+document.getElementById('demoNet').onclick=()=>send("what's the weather in lisbon?",'net');
+document.getElementById('clearBtn').onclick=clearSession;
+toolToggleBtn.onclick=()=>{
+  toolsVisible=!toolsVisible; updateToolVisibility(); notify(toolsVisible?'trace enabled':'trace hidden');
+};
+inspectToggleBtn.onclick=toggleInspect;
+modelSel.onchange=()=>notify('model → '+modelSel.value);
+
+document.querySelectorAll('.command').forEach(row=>{
+  row.onclick=()=>{
+    input.value=row.dataset.command;
+    palette.classList.remove('show');
+    input.focus();
+    send();
+  };
+});
+document.querySelectorAll('.inspectBtn').forEach(btn=>{
+  btn.onclick=()=>{
+    const key = btn.dataset.inspect;
+    if(key==='scratchpad') openScratchpad(Object.keys(scratchpads).length);
+    else openInspectKey(key);
+  };
+});
+
+updateContext(0);
+updateFooter();
+updateToolVisibility();
+updateInspectVisibility();
+openScratchpad(2);
+</script>
+</body>
+</html>
