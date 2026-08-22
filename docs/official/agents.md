@@ -32,6 +32,18 @@ This starts a fake local OpenAI-compatible streaming server and verifies a real 
 binary session can execute model-requested tool calls, including clarification
 handoff through `ask_user`.
 
+Provider-backed agent behavioral tests are separate from `cargo test` and run
+inside isolated temporary workspaces:
+
+```bash
+scripts/run-agent-behavior-tests.sh
+scripts/run-agent-behavior-tests.sh --case conversation-memory
+```
+
+Configure model profiles in `agent-behavior/models.toml`, select the default
+matrix in `agent-behavior/models.list`, and provide secrets through the named
+`api_key_env` environment variables.
+
 Published package shape:
 
 ```bash

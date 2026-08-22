@@ -44,8 +44,10 @@ vyrn should look like a constrained-compute tool, not a generic neon AI product.
 
 ## CLI rules
 
-- Welcome banner and model picker use steel blue rather than cyan.
+- Welcome ASCII product mark and selected navigation states use violet; borders,
+  model metadata, and technical picker details use steel blue rather than cyan.
 - Prompt framing and technical status elements use dark graphite and steel-blue accents.
+- Active-turn and non-streaming wait markers use violet.
 - Savings remain green.
 - Errors remain red.
 - Avoid rainbow banners or mixed accent stacks unless a value has semantic meaning.

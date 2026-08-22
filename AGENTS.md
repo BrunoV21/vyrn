@@ -26,6 +26,30 @@ When editing docs:
 - Treat small-context and local-model usage as the default path.
 - Keep command docs in sync with `docs/prd.md`.
 
+## Agent Behavioral Tests
+
+Live agent behavior is covered by the dedicated fixtures in `agent-behavior/`.
+They are intentionally separate from `cargo test` because they call configured
+models and can consume provider tokens.
+
+- When agentic behavior changes, add or update the corresponding behavioral
+  fixture as part of the same change.
+- Finish the implementation and deterministic Rust tests first. Then run the
+  relevant live case with `scripts/run-agent-behavior-tests.sh --case <id>` so
+  the final behavior is tested, followed by the full behavioral suite when the
+  configured API credentials are available.
+- Behavioral execution must remain inside the runner's isolated temporary
+  workspace. Keep persistent output limited to traces under
+  `.vyrn/behavior-runs/`.
+- Prefer deterministic output, tool, and filesystem assertions. Use an LLM
+  `judge` assertion only for semantic behavior that cannot be expressed
+  deterministically.
+- Keep `agent-behavior/models.toml` and `agent-behavior/models.list` easy to
+  extend. API credentials belong in the environment through `api_key_env`, not
+  in committed configuration.
+- Use repeatable `--case` and `--model` filters when only a focused behavioral
+  subset is needed.
+
 ## Releases
 
 When the user asks to create and push a new release or release tag, create release notes before tagging or pushing.

@@ -52,6 +52,45 @@ Eval cases run in the current repository by default. They can call normal vyrn
 tools, including file edits and shell commands, so keep fixtures small and review
 suite prompts before running them.
 
+For committed live agent-behavior coverage, use the dedicated isolated runner
+instead of invoking `vyrn eval` directly:
+
+```sh
+scripts/run-agent-behavior-tests.sh
+scripts/run-agent-behavior-tests.sh --case conversation-memory
+scripts/run-agent-behavior-tests.sh --case live-steering --model glm-5.2
+```
+
+The runner builds vyrn once, creates a temporary workspace per selected model,
+copies only `agent-behavior/workspace/` into it, and runs every tool from that
+workspace. Persistent traces go to `.vyrn/behavior-runs/`; temporary workspaces
+are removed unless `--keep-workdirs` is passed. This script is never triggered
+by `cargo test`.
+
+Model profiles live in `agent-behavior/models.toml`; `models.list` selects the
+profiles run by default. Add a TOML profile and one list entry to expand the
+matrix. Use `api_key_env` so keys remain in environment variables.
+
+## Multi-turn and steering cases
+
+Add `follow_up_prompts` to exercise conversation memory in one persistent eval
+session:
+
+```json
+{
+  "id": "memory",
+  "prompt": "Remember VIOLET_ORBIT. Reply ACK.",
+  "follow_up_prompts": ["What phrase did I ask you to remember?"],
+  "assertions": [
+    { "type": "assistant_contains", "value": "VIOLET_ORBIT" }
+  ]
+}
+```
+
+The optional `steering` fixture injects a human message after a zero-based agent
+round and before proposed tools execute. It deterministically exercises the
+same next-decision semantics as interactive live steering.
+
 ## Assertions
 
 Supported assertion types:
@@ -62,6 +101,7 @@ Supported assertion types:
 - `tool_called_at_least`
 - `tool_not_called`
 - `file_exists`
+- `file_not_exists`
 - `file_contains`
 - `command_succeeds`
 - `judge`

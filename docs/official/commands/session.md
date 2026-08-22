@@ -25,7 +25,11 @@ reply. In plain text mode, type an option number or any freeform answer.
 Vision-capable models can receive images in the current message through `Ctrl+V`
 clipboard image paste or by mentioning image file paths in the prompt.
 While a turn is running, press `Esc` to cancel it and return to the composer. In
-the composer, press Up/Down to recall previous non-command prompts.
+the composer, press Up/Down to recall previous non-command prompts. To redirect
+an active turn, type a message while the agent is working and press `Enter`.
+vyrn interrupts the current model or tool wait, preserves work that already
+completed, marks unrun tool calls as interrupted, and sends the steering message
+before the agent chooses its next action.
 Type `/`, press `Ctrl+O`, or press `F1` to open the in-session command palette.
 
 The startup UI shows the boxed `vyrn` banner, selected model, and context budget.
@@ -58,6 +62,15 @@ Model profiles can point at local or hosted OpenAI-compatible endpoints:
 base_url = "https://api.groq.com/openai/v1"
 model = "llama-3.1-8b-instant"
 api_key = "gsk_..."
+```
+
+For committed or shared model configuration, keep the secret in the environment:
+
+```toml
+[models.groq-fast]
+base_url = "https://api.groq.com/openai/v1"
+model = "llama-3.1-8b-instant"
+api_key_env = "GROQ_API_KEY"
 ```
 
 ## `vyrn -p "prompt"`

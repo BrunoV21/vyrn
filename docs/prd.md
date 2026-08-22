@@ -128,7 +128,7 @@ api_key = ""
 [models.groq-fast]
 base_url = "https://api.groq.com/openai/v1"
 model = "llama-3.1-8b-instant"
-api_key = "gsk_..."
+api_key_env = "GROQ_API_KEY"
 ```
 
 ### 6.4 `.mcp.json`
@@ -295,7 +295,8 @@ vyrn does not send the full conversation history on each request. Instead, it ma
     relevant. Drop tool call results that are no longer needed."
 3. Updated summary replaces old summary in context array
 4. vyrn makes Call 2 → LLM:
-   [system prompt] + [updated summary] + [new user request]
+   [system prompt] + [exact session goal] + [updated summary]
+   + [bounded exact recent exchange] + [new user request]
 5. Agent responds, executes tools, completes task
 ```
 
@@ -308,6 +309,12 @@ The model decides what to keep. General heuristics it is instructed to follow:
 - Keep: task goals, decisions made, file paths touched, important outputs
 - Drop: raw tool call results once acted on, intermediate reasoning, repeated context
 - Always keep: the user's original high-level goal for the session
+
+The exact first user goal and a bounded exact copy of the most recent exchange
+are deterministic memory anchors rather than model-authored summaries. The
+recent exchange includes the final turn scratchpad so facts learned through
+tools remain available to the next user turn. Empty summary output never clears
+an existing summary.
 
 ### 10.3 Pruning Aggressiveness
 
@@ -341,7 +348,10 @@ This is tracked per-request and accumulated as a session total.
 
 vyrn runs as an interactive terminal session. The user enters requests, the agent responds, executes tools, and streams output — all within a single persistent session.
 While a request is running, `Esc` cancels the active turn and returns to the
-composer. In the composer, Up/Down recalls previous non-command prompts.
+composer. Text submitted with `Enter` during an active turn immediately steers
+the same turn: vyrn interrupts the current model/tool wait, records unrun tool
+calls as interrupted, and sends the human message before the next agent
+decision. In the composer, Up/Down recalls previous non-command prompts.
 Typing `/`, pressing `Ctrl+O`, or pressing `F1` opens the command palette;
 Up/Down selects a command and `Tab` accepts it.
 When the model calls `ask_user`, vyrn renders a clarification prompt with
@@ -365,6 +375,9 @@ vyrn: I'll start by reading the current auth implementation...
 ### 11.2 Streaming
 
 LLM responses stream token by token directly to the terminal as they are returned from the API. Tool calls and results are displayed inline as they execute.
+Every non-streaming model wait, including summary integration and turn-scratchpad
+updates, shows a violet animated status marker so the terminal never appears
+stalled.
 
 ### 11.3 Token Stats Display
 
@@ -446,6 +459,21 @@ Debug mode keeps the normal UI compact while making LLM traffic auditable:
 - Parallel tool calls from one assistant response share one scratchpad update;
   internal compaction work scales with tool batches rather than individual tools.
 
+### 11.8 Agent Behavioral Tests
+
+Live agent behavior is covered separately from normal Rust tests. The dedicated
+`scripts/run-agent-behavior-tests.sh` runner executes the fixtures in
+`agent-behavior/` inside temporary workspaces, runs every profile named in
+`agent-behavior/models.list`, supports focused `--case` and `--model` filters,
+and writes persistent traces only under `.vyrn/behavior-runs/`.
+
+Behavioral fixtures support multi-turn conversations, deterministic live
+steering injection, tool/output/filesystem assertions, and an optional LLM
+judge. Deterministic assertions are preferred. Provider secrets are resolved
+from the environment through `api_key_env`. The live suite is run after an
+agent-behavior implementation and its deterministic tests are complete; normal
+`cargo test` never triggers provider-backed behavioral cases.
+
 ---
 
 ## 12. OpenAI API Compatibility
@@ -490,7 +518,7 @@ Tool calling uses the standard OpenAI `tools` / `tool_choice` format.
 ## 14. Key Design Principles
 
 1. **Token budget is a first-class constraint.** Every design decision — tool descriptions, system prompt, history management — is evaluated through the lens of token cost.
-2. **The model drives context decisions.** vyrn does not mechanically truncate. It asks the model what to keep.
+2. **The model drives compression; deterministic anchors prevent amnesia.** vyrn asks the model what to keep while retaining the exact session goal, recent exchange, and tool-turn scratchpad anchors.
 3. **Raw over structured.** The `batch` tool is a raw shell passthrough. Simplicity beats safety theatre.
 4. **Two calls per request is fine.** Local models are fast and free. More calls for better quality is a good tradeoff.
 5. **Open standards first.** Agent Skills, `.mcp.json`, OpenAI API — no proprietary lock-in anywhere.
