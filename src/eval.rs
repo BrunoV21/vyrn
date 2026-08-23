@@ -8,7 +8,7 @@ use crate::agent::tokens::{
 use crate::agent::transcript::{Exchange, truncate};
 use crate::agent::turn::{
     TurnScratchpad, apply_live_steering_to_tool_batch, build_turn_messages,
-    prepare_next_turn_context, update_turn_scratchpad,
+    prepare_next_turn_context, render_turn_scratchpad, update_turn_scratchpad,
 };
 use crate::cli::EvalArgs;
 use crate::config::{ConfigSources, EffectiveConfig, ModelProfile, ModelRegistry};
@@ -1259,10 +1259,11 @@ impl EvalAgentRunner {
             )?;
             scratchpad = next_context.scratchpad;
             current_tool_batch = next_context.tool_batch;
+            let rendered_scratchpad = render_turn_scratchpad(&scratchpad);
             trace.events.push(EvalTraceEvent::Scratchpad {
                 turn: turn_index,
                 round,
-                summary: scratchpad.summary.clone(),
+                summary: rendered_scratchpad.clone(),
             });
             let preparation = next_context.preparation;
             self.debug_log(format!(
@@ -1273,7 +1274,7 @@ impl EvalAgentRunner {
                 preparation.after_tokens,
                 preparation.threshold,
                 preparation.max_tokens,
-                estimate_text_tokens(&scratchpad.summary),
+                estimate_text_tokens(&rendered_scratchpad),
                 current_tool_batch.len()
             ));
             if round + 1 == max_rounds {
@@ -1284,7 +1285,7 @@ impl EvalAgentRunner {
         self.context.set_previous_exchange(Exchange {
             user_input: exchange_user_input(prompt_text, images.len()),
             assistant_text: assistant_text.clone(),
-            turn_scratchpad: scratchpad.summary.clone(),
+            turn_scratchpad: render_turn_scratchpad(&scratchpad),
             tool_calls: trace.tool_calls[first_tool_call..].to_vec(),
             tool_results: trace.tool_results[first_tool_result..].to_vec(),
         });
@@ -1510,6 +1511,7 @@ mod tests {
         ];
         let scratchpad = TurnScratchpad {
             summary: "- large file contained marker".to_string(),
+            ..TurnScratchpad::default()
         };
         let tool_batch = vec![
             ChatMessage::assistant_tool_calls(
