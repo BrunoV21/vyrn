@@ -60,3 +60,32 @@ pub fn truncate(value: &str, max_chars: usize) -> String {
     truncated.push_str("\n[truncated]");
     truncated
 }
+
+pub fn truncate_ends(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    const MARKER: &str = "\n[... compacted ...]\n";
+    let marker_chars = MARKER.chars().count();
+    if max_chars <= marker_chars + 2 {
+        return value.chars().take(max_chars).collect();
+    }
+
+    let retained = max_chars - marker_chars;
+    let head_chars = retained.div_ceil(2);
+    let tail_chars = retained / 2;
+    let head = value.chars().take(head_chars).collect::<String>();
+    let tail = value
+        .chars()
+        .rev()
+        .take(tail_chars)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{head}{MARKER}{tail}")
+}

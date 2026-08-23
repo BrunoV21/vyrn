@@ -70,6 +70,83 @@ fn context_memory_keeps_goal_recent_exchange_and_tool_scratchpad() {
 }
 
 #[test]
+fn context_ignores_greeting_until_a_meaningful_goal_arrives() {
+    let mut context =
+        vyrn::agent::context::ContextManager::new(1000, SummaryAggressiveness::Medium);
+
+    context.begin_turn("hi there");
+    context.set_previous_exchange(Exchange {
+        user_input: "hi there".to_string(),
+        assistant_text: "Hello.".to_string(),
+        turn_scratchpad: String::new(),
+        tool_calls: Vec::new(),
+        tool_results: Vec::new(),
+    });
+    assert!(
+        !context
+            .prompt_memory()
+            .unwrap()
+            .contains("session goal (bounded verbatim):\nhi there")
+    );
+
+    context.begin_turn("inspect the failing tests");
+    assert!(
+        context
+            .prompt_memory()
+            .unwrap()
+            .contains("session goal (bounded verbatim):\ninspect the failing tests")
+    );
+}
+
+#[test]
+fn exact_tool_memory_survives_beyond_the_most_recent_exchange() {
+    let mut context =
+        vyrn::agent::context::ContextManager::new(1000, SummaryAggressiveness::Medium);
+    context.begin_turn("inspect the repository");
+    context.set_previous_exchange(Exchange {
+        user_input: "locate the repository".to_string(),
+        assistant_text: "Located it.".to_string(),
+        turn_scratchpad: "- results: /Users/bv-mac/Desktop/repos/vyrn".to_string(),
+        tool_calls: Vec::new(),
+        tool_results: Vec::new(),
+    });
+    context.set_previous_exchange(Exchange {
+        user_input: "continue".to_string(),
+        assistant_text: "Continuing.".to_string(),
+        turn_scratchpad: String::new(),
+        tool_calls: Vec::new(),
+        tool_results: Vec::new(),
+    });
+
+    let memory = context.prompt_memory().unwrap();
+    assert!(memory.contains("exact tool memory (verbatim, authoritative)"));
+    assert!(memory.contains("/Users/bv-mac/Desktop/repos/vyrn"));
+    assert!(memory.contains("user: continue"));
+}
+
+#[test]
+fn prompt_memory_scales_down_for_a_small_context_window() {
+    let mut context =
+        vyrn::agent::context::ContextManager::new(1200, SummaryAggressiveness::Medium);
+    context.begin_turn(&format!("inspect {}", "goal".repeat(600)));
+    context.set_previous_exchange(Exchange {
+        user_input: format!("read {}", "request".repeat(600)),
+        assistant_text: "answer".repeat(600),
+        turn_scratchpad: format!(
+            "OLD_EXACT_PATH /Users/bv-mac/project\n{}\nTAIL_MARKER VIOLET_92017",
+            "tool-output".repeat(600)
+        ),
+        tool_calls: Vec::new(),
+        tool_results: Vec::new(),
+    });
+
+    let memory = context.prompt_memory().unwrap();
+    assert!(memory.chars().count() < 1600, "{}", memory.chars().count());
+    assert!(memory.contains("OLD_EXACT_PATH"));
+    assert!(memory.contains("TAIL_MARKER VIOLET_92017"));
+}
+
+#[test]
 fn token_ledger_accumulates_savings() {
     let mut ledger = TokenLedger::default();
     let mut turn = TurnUsage::default();
@@ -138,6 +215,21 @@ fn token_ledger_tracks_summary_input_and_output_without_creating_savings() {
     assert_eq!(ledger.session_saved, 0);
     assert_eq!(ledger.turns[0].breakdown.summary_inputs, 100);
     assert_eq!(ledger.turns[0].breakdown.summary_outputs, 25);
+    assert_eq!(ledger.memory_overhead_tokens(), 125);
+    assert_eq!(ledger.net_history_savings(), -125);
+}
+
+#[test]
+fn token_ledger_reports_history_reduction_separately_from_memory_overhead() {
+    let mut ledger = TokenLedger::default();
+    let mut turn = TurnUsage::default();
+    turn.add_call("summary", 100, 100);
+    turn.add_call("agent-0", 300, 700);
+    ledger.push_turn(turn);
+
+    assert_eq!(ledger.session_saved, 400);
+    assert_eq!(ledger.memory_overhead_tokens(), 100);
+    assert_eq!(ledger.net_history_savings(), 300);
 }
 
 #[test]

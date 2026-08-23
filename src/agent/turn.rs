@@ -1,11 +1,13 @@
-use crate::agent::tokens::{estimate_chat_request_breakdown, estimate_messages_breakdown};
-use crate::agent::transcript::truncate;
+use crate::agent::tokens::estimate_chat_request_breakdown;
+use crate::agent::transcript::{truncate, truncate_ends};
 use crate::llm::{ChatMessage, LlmError, MessageContent, ToolCall};
 
 const TOOL_CONTEXT_COMPACTION_PERCENT: usize = 70;
 const COMPACTED_TOOL_RESULT_CONTENT: &str = "[tool output compacted into turn scratchpad]";
 const COMPACTED_TOOL_IMAGE_CONTENT: &str =
     "Attached image(s) from read_image compacted into turn scratchpad.";
+const TURN_SCRATCHPAD_MAX_CHARS: usize = 1800;
+const TOOL_BATCH_CHECKPOINT_MAX_CHARS: usize = 1400;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnScratchpad {
@@ -73,7 +75,7 @@ pub fn prepare_next_turn_context(
     let threshold = tool_context_compaction_threshold(max_tokens);
     let original_messages = build_turn_messages(base_messages, scratchpad, tool_batch);
     let before_tokens = estimate_chat_request_breakdown(&original_messages, tools).total();
-    if before_tokens <= max_tokens {
+    if before_tokens <= threshold {
         return Ok(NextTurnContext {
             scratchpad: scratchpad.clone(),
             tool_batch: tool_batch.to_vec(),
@@ -86,22 +88,24 @@ pub fn prepare_next_turn_context(
         });
     }
 
-    for candidate_scratchpad in scratchpad_candidates(&scratchpad.summary) {
-        for candidate_batch in tool_batch_candidates(tool_batch) {
-            let messages =
-                build_turn_messages(base_messages, &candidate_scratchpad, &candidate_batch);
-            let after_tokens = estimate_chat_request_breakdown(&messages, tools).total();
-            if after_tokens <= max_tokens {
-                return Ok(NextTurnContext {
-                    scratchpad: candidate_scratchpad,
-                    tool_batch: candidate_batch,
-                    preparation: ToolChainPreparation {
-                        before_tokens,
-                        after_tokens,
-                        threshold,
-                        max_tokens,
-                    },
-                });
+    for target in [threshold, max_tokens] {
+        for candidate_scratchpad in scratchpad_candidates(&scratchpad.summary) {
+            for candidate_batch in tool_batch_candidates(tool_batch) {
+                let messages =
+                    build_turn_messages(base_messages, &candidate_scratchpad, &candidate_batch);
+                let after_tokens = estimate_chat_request_breakdown(&messages, tools).total();
+                if after_tokens <= target {
+                    return Ok(NextTurnContext {
+                        scratchpad: candidate_scratchpad,
+                        tool_batch: candidate_batch,
+                        preparation: ToolChainPreparation {
+                            before_tokens,
+                            after_tokens,
+                            threshold,
+                            max_tokens,
+                        },
+                    });
+                }
             }
         }
     }
@@ -111,71 +115,29 @@ pub fn prepare_next_turn_context(
     )))
 }
 
-pub fn turn_scratchpad_update_source(
+pub fn update_turn_scratchpad(
+    current: &TurnScratchpad,
     consumed_tool_batch: &[ChatMessage],
-    assistant_response: &ChatMessage,
-) -> String {
-    let mut lines = Vec::new();
-    if !consumed_tool_batch.is_empty() {
-        lines.push(tool_round_compaction_source(consumed_tool_batch, 1));
+) -> TurnScratchpad {
+    let checkpoint = turn_scratchpad_update_source(consumed_tool_batch);
+    if checkpoint.trim().is_empty() {
+        return current.clone();
     }
-    lines.push(assistant_response_source(assistant_response));
-    lines.join("\n\n")
+    let combined = if current.summary.trim().is_empty() {
+        checkpoint
+    } else {
+        format!("{}\n{}", current.summary.trim(), checkpoint.trim())
+    };
+    TurnScratchpad {
+        summary: truncate_ends(&combined, TURN_SCRATCHPAD_MAX_CHARS),
+    }
 }
 
-pub fn build_turn_scratchpad_update_messages(
-    current_scratchpad: &str,
-    source: &str,
-) -> Vec<ChatMessage> {
-    vec![
-        ChatMessage::system(
-            "You update a compact scratchpad for one active terminal-agent turn. Preserve task-relevant facts, decisions, file paths, commands and outcomes, errors that changed behavior, artifacts created, and next steps. Drop raw tool JSON, full stdout/stderr, repeated diffs, and dead ends. Return only concise bullets for the full updated scratchpad.",
-        ),
-        ChatMessage::user(format!(
-            "Current scratchpad:\n{}\n\nNew consumed tool batch and assistant response:\n{}",
-            if current_scratchpad.trim().is_empty() {
-                "none"
-            } else {
-                current_scratchpad.trim()
-            },
-            source
-        )),
-    ]
-}
-
-pub fn build_fitted_turn_scratchpad_update_messages(
-    current_scratchpad: &str,
-    source: &str,
-    max_tokens: usize,
-) -> Vec<ChatMessage> {
-    let mut fitted_source = source.to_string();
-    let mut fitted_scratchpad = current_scratchpad.to_string();
-    loop {
-        let messages = build_turn_scratchpad_update_messages(&fitted_scratchpad, &fitted_source);
-        if estimate_messages_breakdown(&messages).total() <= max_tokens {
-            return messages;
-        }
-
-        let source_chars = fitted_source.chars().count();
-        if source_chars > 256 {
-            fitted_source = truncate(&fitted_source, source_chars.saturating_mul(3) / 4);
-            continue;
-        }
-
-        let scratchpad_chars = fitted_scratchpad.chars().count();
-        if scratchpad_chars > 256 {
-            fitted_scratchpad =
-                truncate(&fitted_scratchpad, scratchpad_chars.saturating_mul(3) / 4);
-            continue;
-        }
-
-        return build_turn_scratchpad_update_messages(
-            &truncate(
-                &fitted_scratchpad,
-                scratchpad_chars.saturating_sub(1).max(1),
-            ),
-            &truncate(&fitted_source, source_chars.saturating_sub(1).max(1)),
-        );
+pub fn turn_scratchpad_update_source(consumed_tool_batch: &[ChatMessage]) -> String {
+    if consumed_tool_batch.is_empty() {
+        String::new()
+    } else {
+        tool_round_compaction_source(consumed_tool_batch)
     }
 }
 
@@ -243,7 +205,7 @@ fn scratchpad_candidates(summary: &str) -> Vec<TurnScratchpad> {
     });
     for limit in [4000, 2000, 1000, 500, 250, 100] {
         let candidate = TurnScratchpad {
-            summary: truncate(summary, limit),
+            summary: truncate_ends(summary, limit),
         };
         if candidates.last() != Some(&candidate) {
             candidates.push(candidate);
@@ -265,7 +227,7 @@ fn is_tool_image_attachment_message(message: &ChatMessage) -> bool {
             .is_some_and(|content| content.starts_with("Attached image(s) from read_image:"))
 }
 
-fn tool_round_compaction_source(messages: &[ChatMessage], batch_number: usize) -> String {
+fn tool_round_compaction_source(messages: &[ChatMessage]) -> String {
     let mut tools = Vec::new();
     let mut results = Vec::new();
     for message in messages {
@@ -274,54 +236,38 @@ fn tool_round_compaction_source(messages: &[ChatMessage], batch_number: usize) -
                 tools.push(format!(
                     "{}({})",
                     call.function.name,
-                    truncate(&call.function.arguments, 800)
+                    truncate_ends(&compact_value(&call.function.arguments), 360)
                 ));
             }
         } else if message.role == "tool" {
             let result = message.content_text().unwrap_or_default();
-            results.push(truncate(result, 1600).replace('\n', " "));
+            results.push(truncate_ends(&compact_value(result), 700));
         } else if is_tool_image_attachment_message(message) {
-            results.push(message.content_text().unwrap_or_default().to_string());
+            results.push(
+                message
+                    .content_text()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+            );
         }
     }
 
-    let mut line = format!("batch {batch_number}\ntools: {}", tools.join(", "));
-    if !results.is_empty() {
-        line.push_str("\nresults:\n- ");
-        line.push_str(&results.join("\n- "));
+    let mut lines = Vec::new();
+    if !tools.is_empty() {
+        lines.push(format!("- tools: {}", tools.join(", ")));
     }
-    truncate(&line, 2200)
+    if !results.is_empty() {
+        lines.push(format!("- results: {}", results.join(" | ")));
+    }
+    truncate_ends(&lines.join("\n"), TOOL_BATCH_CHECKPOINT_MAX_CHARS)
 }
 
-fn assistant_response_source(message: &ChatMessage) -> String {
-    let mut lines = Vec::new();
-    if let Some(text) = message
-        .content_text()
-        .filter(|text| !text.trim().is_empty())
-    {
-        lines.push(format!("assistant response: {}", truncate(text, 1200)));
-    }
-    if let Some(tool_calls) = &message.tool_calls {
-        let calls = tool_calls
-            .iter()
-            .map(|call| {
-                format!(
-                    "{}({})",
-                    call.function.name,
-                    truncate(&call.function.arguments, 400)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        if !calls.is_empty() {
-            lines.push(format!("assistant requested next tools: {calls}"));
-        }
-    }
-    if lines.is_empty() {
-        "assistant response: none".to_string()
-    } else {
-        lines.join("\n")
-    }
+fn compact_value(value: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(value)
+        .ok()
+        .and_then(|value| serde_json::to_string(&value).ok())
+        .unwrap_or_else(|| value.trim().to_string())
 }
 
 #[cfg(test)]
@@ -429,36 +375,78 @@ mod tests {
     }
 
     #[test]
-    fn turn_scratchpad_source_includes_tool_batch_and_assistant_response() {
-        let batch = vec![
-            tool_call_message(0),
-            ChatMessage::tool("call_0", "found README.md and src/tui/repl.rs changes"),
+    fn next_turn_context_compacts_at_safety_threshold_before_hard_limit() {
+        let base = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("read medium output"),
         ];
-        let response = ChatMessage::assistant_tool_calls(
-            "Next I will inspect tests.".to_string(),
-            vec![tool_call("call_1", "batch")],
-        );
+        let scratchpad = TurnScratchpad {
+            summary: "- exact marker VIOLET_7319".to_string(),
+        };
+        let tool_batch = vec![
+            ChatMessage::assistant_tool_calls(
+                String::new(),
+                vec![tool_call("call_read", "read_file")],
+            ),
+            ChatMessage::tool("call_read", "x".repeat(2400)),
+        ];
 
-        let source = turn_scratchpad_update_source(&batch, &response);
+        let next = prepare_next_turn_context(&base, &scratchpad, &tool_batch, &[], 900).unwrap();
 
-        assert!(source.contains("found README.md"));
-        assert!(source.contains("Next I will inspect tests."));
-        assert!(source.contains("batch"));
+        assert!(next.preparation.before_tokens > next.preparation.threshold);
+        assert!(next.preparation.before_tokens <= next.preparation.max_tokens);
+        assert!(next.preparation.after_tokens <= next.preparation.threshold);
+        assert!(next.preparation.after_tokens < next.preparation.before_tokens);
+        assert!(next.scratchpad.summary.contains("VIOLET_7319"));
     }
 
     #[test]
-    fn scratchpad_update_prompt_drops_raw_output_by_instruction() {
-        let messages =
-            build_turn_scratchpad_update_messages("- existing fact", "tool output with details");
+    fn deterministic_scratchpad_keeps_exact_tool_facts_without_duplicate_request() {
+        let batch = vec![
+            ChatMessage::assistant_tool_calls(
+                "Inspecting the requested file.".to_string(),
+                vec![ToolCall {
+                    id: "call_0".to_string(),
+                    kind: "function".to_string(),
+                    function: ToolCallFunction {
+                        name: "read_file".to_string(),
+                        arguments: r#"{"path":"/Users/bv-mac/project/README.md"}"#.to_string(),
+                    },
+                }],
+            ),
+            ChatMessage::tool("call_0", "found README.md and src/tui/repl.rs changes"),
+        ];
 
-        let prompt = messages
-            .iter()
-            .filter_map(ChatMessage::content_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(prompt.contains("Drop raw tool JSON"));
-        assert!(prompt.contains("existing fact"));
-        assert!(prompt.contains("tool output with details"));
+        let scratchpad = update_turn_scratchpad(&TurnScratchpad::default(), &batch);
+
+        assert!(
+            scratchpad
+                .summary
+                .contains("/Users/bv-mac/project/README.md")
+        );
+        assert!(scratchpad.summary.contains("found README.md"));
+        assert_eq!(scratchpad.summary.matches("read_file(").count(), 1);
+        assert!(!scratchpad.summary.contains("requested next tools"));
+    }
+
+    #[test]
+    fn deterministic_scratchpad_is_bounded_and_preserves_old_and_new_edges() {
+        let current = TurnScratchpad {
+            summary: format!("OLD_EXACT_PATH /Users/bv-mac/project\n{}", "a".repeat(1400)),
+        };
+        let batch = vec![
+            tool_call_message(0),
+            ChatMessage::tool(
+                "call_0",
+                format!("{}\nNEW_EXACT_MARKER VIOLET_7319", "b".repeat(1400)),
+            ),
+        ];
+
+        let scratchpad = update_turn_scratchpad(&current, &batch);
+
+        assert!(scratchpad.summary.chars().count() <= TURN_SCRATCHPAD_MAX_CHARS);
+        assert!(scratchpad.summary.contains("OLD_EXACT_PATH"));
+        assert!(scratchpad.summary.contains("NEW_EXACT_MARKER"));
     }
 
     fn tool_call_message(index: usize) -> ChatMessage {

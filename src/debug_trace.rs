@@ -992,6 +992,7 @@ mod tests {
         let result = Ok(ChatCompletionResponse {
             choices: vec![ChatChoice {
                 message: ChatMessage::assistant("hi"),
+                finish_reason: Some("stop".to_string()),
             }],
             usage: Some(Usage {
                 prompt_tokens: 8,

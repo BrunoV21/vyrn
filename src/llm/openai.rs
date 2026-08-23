@@ -118,6 +118,7 @@ impl OpenAiClient {
         let mut content = String::new();
         let mut tool_calls: BTreeMap<usize, ToolCallAccumulator> = BTreeMap::new();
         let mut usage = None;
+        let mut finish_reason = None;
         let mut buffer = String::new();
         let mut bytes = response.bytes_stream();
 
@@ -148,6 +149,9 @@ impl OpenAiClient {
                     usage = Some(event_usage);
                 }
                 for choice in event.choices {
+                    if choice.finish_reason.is_some() {
+                        finish_reason = choice.finish_reason;
+                    }
                     if let Some(delta_content) = choice.delta.content {
                         content.push_str(&delta_content);
                         on_event(StreamEvent::TextDelta(delta_content));
@@ -188,6 +192,7 @@ impl OpenAiClient {
                 } else {
                     ChatMessage::assistant_tool_calls(content, calls)
                 },
+                finish_reason,
             }],
             usage,
         })
@@ -252,6 +257,8 @@ struct StreamChunk {
 #[derive(Debug, Deserialize)]
 struct StreamChoice {
     delta: StreamDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]

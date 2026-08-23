@@ -177,6 +177,8 @@ pub struct ChatCompletionResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatChoice {
     pub message: ChatMessage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]

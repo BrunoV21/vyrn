@@ -117,6 +117,19 @@ impl TokenLedger {
         self.session_saved += usage.saved;
         self.turns.push(usage);
     }
+
+    pub fn memory_overhead_tokens(&self) -> usize {
+        self.turns
+            .iter()
+            .flat_map(|turn| &turn.calls)
+            .filter(|call| matches!(call.label.as_str(), "summary" | "turn-scratchpad"))
+            .map(|call| call.sent)
+            .sum()
+    }
+
+    pub fn net_history_savings(&self) -> isize {
+        self.session_saved - self.memory_overhead_tokens() as isize
+    }
 }
 
 impl TurnUsage {
