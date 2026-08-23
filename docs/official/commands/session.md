@@ -31,12 +31,62 @@ vyrn interrupts the current model or tool wait, preserves work that already
 completed, marks unrun tool calls as interrupted, and sends the steering message
 before the agent chooses its next action.
 Type `/`, press `Ctrl+O`, or press `F1` to open the in-session command palette.
+Click a visible command to run it, or use the mouse wheel over the palette to
+change the selection. The palette redraws on terminal resize and windows the
+command list when the terminal is too short to show every match.
 
 The startup UI shows the boxed `vyrn` banner, selected model, and context budget.
 If no model is selected at startup, vyrn uses the last selected model, then the
 configured default, then the first configured model.
 If no model profiles exist, vyrn starts a setup flow and writes the new profile to
 `~/.vyrn/models.toml`.
+
+## `vyrn tui`
+
+Starts the opt-in full-screen terminal interface. The normal `vyrn` interface
+remains the default while this experience is evaluated.
+
+```bash
+vyrn tui
+```
+
+From a source checkout:
+
+```bash
+cargo run -- tui
+```
+
+The full-screen interface keeps the model, working directory, context meter,
+inspector controls, transcript, composer, and token footer visible while the
+real agent streams. It supports the same slash commands, prompt history, live
+steering, cancellation, image attachment, model switching, tool previews, and
+`ask_user` clarification flow. User prompts and assistant responses use distinct
+full-row backgrounds while sharing the same text alignment; tool traces retain
+their nested tree layout. Use PageUp/PageDown to scroll and End to follow the
+latest output. Click the active model name to open the model picker, click a
+model row to switch, and use the clickable header and inspect-strip controls for
+trace, inspect, clear, refresh, and inspector views. Alt shortcuts mirror those
+controls; `/help` lists the complete key map. The inspect strip presents boxed
+`help`, `stats`, `context`, `scratchpad`, `manifest`, `skills`, and `refresh`
+buttons. Clicking the selected inspector button again collapses its panel.
+With inspect visible, each interaction also exposes its own scratchpad control;
+turns without tool-driven compaction explicitly show `none`. Generated labels
+use the scratchpad response's output-token count (and identify an estimated
+fallback when provider usage is missing). Tool rows start collapsed; click a row
+to reveal or hide its input and output preview independently.
+These controls remain clickable while the model is thinking or streaming. View
+controls update immediately; model switches and manifest refreshes are applied
+after the active turn, while `clear` cancels that turn before clearing the
+session.
+
+Session flags are accepted after the subcommand, for example:
+
+```bash
+vyrn tui --debug --context 2048
+```
+
+`vyrn tui` requires an interactive terminal and cannot be combined with
+`--prompt`.
 
 ## `vyrn --models`
 

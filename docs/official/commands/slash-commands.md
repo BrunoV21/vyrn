@@ -4,7 +4,10 @@ Slash commands are available inside an active interactive session.
 
 In a real terminal, type `/`, press `Ctrl+O`, or press `F1` to open the command
 palette. Continue typing to filter it, use Up/Down to select, press `Tab` to
-accept without running, or press `Enter` to run the selected completion.
+accept without running, or press `Enter` to run the selected completion. A left
+click runs a visible command, and the mouse wheel changes the selection while
+the pointer is over the palette. Resizing the terminal redraws the palette and
+keeps the selected command inside its visible window.
 
 ## `/help`
 

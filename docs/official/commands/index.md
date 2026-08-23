@@ -7,6 +7,7 @@ vyrn has a deliberately small command surface. The primary interface is the inte
 | Command | Description |
 |---|---|
 | `vyrn` | Start an interactive session with the default model. |
+| `vyrn tui` | Start the opt-in full-screen terminal interface preview. |
 | `vyrn -p "inspect src"` | Run one prompt non-interactively, then exit. |
 | `vyrn init` | Create a local `.vyrn/` scaffold with starter config files. |
 | `vyrn --models` | Select a configured model profile before starting. `--model` is an alias. |

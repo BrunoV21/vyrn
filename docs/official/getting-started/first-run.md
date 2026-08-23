@@ -52,6 +52,16 @@ turn spent: 812 | turn history saved: 3,204 | session history saved: 11,847 | co
 
 Use `/exit` to close the session.
 
+To try the full-screen interface while keeping the normal interface as the
+default, launch:
+
+```bash
+cargo run -- tui
+```
+
+Use PageUp/PageDown for transcript scrolling, End to follow new output, and
+Ctrl+K for the command palette.
+
 If the model needs a decision during a turn, vyrn may render an `ask_user`
 clarification prompt. Choose an option with the keyboard, or use `Other` for a
 freeform reply. In plain text mode, type an option number or any text reply.

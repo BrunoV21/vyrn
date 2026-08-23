@@ -17,6 +17,12 @@ Most agent tools assume they can spend 128K+ context windows and still feel fast
 vyrn is a token-efficient, model-agnostic CLI agent built in Rust for developers and terminal-native users running local or small LLMs. It keeps the always-loaded prompt and tool surface tiny, uses raw shell batching as the main power primitive, and tracks token savings as a first-class product signal.
 
 The interactive interface uses native terminal scrollback with `crossterm` raw-mode input. Real terminals get styled prompts, live streaming output, live slash-command completion, inline `/models` selection, running indicators, compact tool previews, clarification prompts, and a composer status row; piped or scripted runs fall back to plain text.
+An opt-in `vyrn tui` command previews a full-screen layout with persistent
+context telemetry, inspector controls, transcript, composer, and session stats.
+Its header, inspect strip, command palette, and model picker support mouse
+clicks. Inspect mode adds per-interaction scratchpad controls and independently
+expandable tool rows, which stay collapsed by default. The native-scrollback
+interface remains the default.
 
 ```text
 ┌──────────────┐   compact prompt    ┌──────────────┐
@@ -88,6 +94,12 @@ Start an interactive session:
 cargo run -- --models
 ```
 
+Try the opt-in full-screen interface:
+
+```bash
+cargo run -- tui
+```
+
 Initialize a local project scaffold when you want repo-specific config:
 
 ```bash
@@ -117,7 +129,9 @@ model glm-4-5-air  context 4096
 
 Type `/`, press `Ctrl+O`, or press `F1` to open the command palette. Continue
 typing to filter it, use Up/Down to select, press `Tab` to accept, or press
-`Enter` to run the selected command.
+`Enter` to run the selected command. You can also click a visible command to run
+it or use the mouse wheel over the palette to change the selection. The palette
+adapts to terminal resizes and windows the command list in short terminals.
 
 The composer status row under the input box shows cumulative model I/O for the
 request, prior-history summary savings, session history savings, and the current

@@ -347,6 +347,11 @@ This is tracked per-request and accumulated as a session total.
 ### 11.1 Interactive REPL
 
 vyrn runs as an interactive terminal session. The user enters requests, the agent responds, executes tools, and streams output — all within a single persistent session.
+The default `vyrn` command keeps the native-scrollback interface. `vyrn tui`
+opts into the full-screen interface preview, with a persistent model/context
+header, inspector, transcript, composer, command palette, and session footer.
+The full-screen preview uses the same agent loop and does not change
+non-interactive `--prompt` behavior.
 While a request is running, `Esc` cancels the active turn and returns to the
 composer. Text submitted with `Enter` during an active turn immediately steers
 the same turn: vyrn interrupts the current model/tool wait, records unrun tool
@@ -356,6 +361,10 @@ Typing `/`, pressing `Ctrl+O`, or pressing `F1` opens the command palette;
 Up/Down selects a command and `Tab` accepts it.
 When the model calls `ask_user`, vyrn renders a clarification prompt with
 selectable options and a freeform reply path, then continues the same turn.
+With inspect visible, every interaction exposes its retained scratchpad (or an
+explicit `none`) and the output-token count returned by each scratchpad
+generation response. Tool rows remain collapsed until the user clicks one to
+inspect its input and output preview.
 
 ```
 vyrn
@@ -405,6 +414,7 @@ project-local override file and lets the user select one with Up/Down and Enter.
 | Command | Description |
 |---|---|
 | `vyrn` | Start interactive session with default model |
+| `vyrn tui` | Start the opt-in full-screen terminal interface preview |
 | `vyrn -p "inspect src"` | Run one prompt non-interactively and exit; combines with `--debug`, `--context`, and `--verbose` |
 | `vyrn init` | Create a project-local `.vyrn/` scaffold |
 | `vyrn --models` | Select model before starting; `--model` is an alias |

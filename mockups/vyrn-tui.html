@@ -3,21 +3,21 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>VYRN — TUI mockup v7</title>
+<title>VYRN — TUI mockup v8</title>
 <style>
 :root{
-  --bg:#071019;
-  --row:#0b141d;
-  --line:#1a2a37;
-  --line2:#233746;
-  --text:#cfd9e2;
-  --muted:#6f8292;
-  --muted2:#536777;
-  --accent:#9a7bff;
-  --cyan:#61d4cf;
-  --green:#7ad59a;
-  --amber:#dfb865;
-  --red:#e27e86;
+  --bg:#06070A;
+  --row:#0D1016;
+  --line:#273142;
+  --line2:#3A475E;
+  --text:#F3F7FB;
+  --muted:#98A3B3;
+  --muted2:#677287;
+  --accent:#8B5CF6;
+  --cyan:#7DA2C2;
+  --green:#9FE870;
+  --amber:#F5A524;
+  --red:#F43F5E;
 }
 *{box-sizing:border-box}
 html,body{height:100%}
@@ -215,25 +215,26 @@ body.showShortcuts .inspectBtn .shortcutTag{display:block; top:-12px; right:auto
 
 .transcript{
   overflow:auto;
-  padding:10px 0 24px;
+  padding:14px 0 30px;
   scroll-behavior:smooth;
 }
 .transcript::-webkit-scrollbar{width:8px}
 .transcript::-webkit-scrollbar-thumb{background:#1a2a37}
 .turn{margin:0}
+.turn + .turn{margin-top:22px}
 .userline{
   display:grid;
   grid-template-columns:18px 1fr;
   gap:7px;
-  padding:7px 14px;
+  padding:9px 14px;
   background:#0a141d;
   border-top:1px solid rgba(255,255,255,.015);
   border-bottom:1px solid rgba(255,255,255,.015);
 }
 .promptMark{color:var(--cyan);font-weight:700}
 .usertext{color:#d6e0e7;white-space:pre-wrap}
-.assistant{padding:8px 14px 12px 39px}
-.answer{white-space:pre-wrap;color:#bdcad4;padding-top:4px}
+.assistant{padding:12px 14px 16px 39px}
+.answer{white-space:pre-wrap;color:#bdcad4;padding-top:8px}
 .answer code{
   color:#d2dbe3;background:#0c1720;border:1px solid var(--line);padding:1px 4px;
 }
@@ -259,7 +260,7 @@ body.showShortcuts .inspectBtn .shortcutTag{display:block; top:-12px; right:auto
 .tool summary{
   list-style:none;
   display:grid;
-  grid-template-columns:18px 68px minmax(0,1fr) auto auto;
+  grid-template-columns:18px 88px minmax(0,1fr) auto auto;
   gap:8px;
   align-items:center;
   padding:6px 10px;
@@ -309,6 +310,28 @@ body.showShortcuts .inspectBtn .shortcutTag{display:block; top:-12px; right:auto
   font-size:10px;
 }
 .mini:hover{color:#c5d0d9;border-color:#304655}
+.interactionMeta{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  min-height:24px;
+  margin-top:10px;
+  color:var(--muted2);
+  font-size:10px;
+}
+.scratchIcon{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  border:1px solid var(--line);
+  background:transparent;
+  color:#A9BDD3;
+  padding:3px 7px;
+  cursor:pointer;
+}
+.scratchIcon:hover{border-color:var(--accent);color:var(--text)}
+.scratchIcon i{font-style:normal;color:#A78BFA}
+.scratchIcon b{font-weight:500;color:var(--muted)}
 
 .thinking{
   display:inline-flex;gap:5px;align-items:center;color:#7d6bd1;font-size:12px;padding:4px 0;
@@ -482,7 +505,7 @@ body.hideInspect .inspector{
 
 @media(max-width:900px){
   .app{min-width:0}
-  .tool summary{grid-template-columns:16px 58px minmax(0,1fr) auto}
+  .tool summary{grid-template-columns:16px 80px minmax(0,1fr) auto}
   .toolMeta{display:none}
   .debugPath{display:none}
 }
@@ -524,13 +547,13 @@ body.hideInspect .inspector{
   <div class="contextStrip">
     <div class="contextMeta">
       <span>context</span>
-      <b id="ctxCount">1,009 / 4,096</b>
+      <b id="ctxCount">1,346 / 4,096</b>
       <span class="sep">│</span>
-      <span>system <b id="sysCount">244</b></span>
-      <span>history <b id="histCount">701</b></span>
-      <span>scratch <b id="scratchCount">64</b></span>
+      <span>system <b id="sysCount">917</b></span>
+      <span>history <b id="histCount">346</b></span>
+      <span>scratch <b id="scratchCount">83</b></span>
       <div class="grow"></div>
-      <span>available <b id="availCount">3,087</b></span>
+      <span>available <b id="availCount">2,750</b></span>
     </div>
     <div class="contextBar" title="system / history / scratch / free">
       <span class="segSystem" id="segSystem"></span>
@@ -569,72 +592,106 @@ body.hideInspect .inspector{
     <div class="turn" data-turn="1">
       <div class="userline">
         <span class="promptMark">›</span>
-        <span class="usertext">run the tests and tell me only what matters</span>
+        <span class="usertext">what time is it now?</span>
       </div>
       <div class="assistant">
-        <div class="trace">
-          <div class="traceLine ok"><span class="traceTag">plan</span> smallest useful check → test suite</div>
-        </div>
-
         <details class="tool">
           <summary>
             <span class="chev">›</span>
-            <span class="toolName">tool.shell</span>
-            <span class="toolCmd">cargo test -q</span>
-            <span class="toolMeta">0.72s</span>
+            <span class="toolName">tool.batch</span>
+            <span class="toolCmd">date</span>
+            <span class="toolMeta">0.01s</span>
             <span class="toolState">ok</span>
           </summary>
           <div class="toolBody">
             <div class="toolGrid">
-              <span>cwd</span><b>~/vyrn</b>
-              <span>command</span><b>cargo test -q</b>
+              <span>cwd</span><b>~/Desktop/repos/vyrn</b>
+              <span>command</span><b>date</b>
               <span>exit</span><b>0</b>
-              <span>duration</span><b>721 ms</b>
-              <span>tokens kept</span><b>18</b>
+              <span>duration</span><b>10 ms</b>
             </div>
-            <div class="stdout"><strong>18 passed</strong> · 0 failed · 0 ignored</div>
+            <div class="stdout"><strong>stdout:</strong> Sun Aug 23 17:40:47 WEST 2026</div>
             <div class="toolActions">
-              <button class="mini" onclick="copyText('cargo test -q')">copy command</button>
-              <button class="mini" onclick="openScratchpad(1)">scratchpad</button>
+              <button class="mini" onclick="copyText('date')">copy command</button>
               <button class="mini" onclick="notify('full raw output would open here')">raw output</button>
             </div>
           </div>
         </details>
-
-        <div class="answer">18 tests passed. No failures.</div>
+        <div class="answer">It's currently <strong>Sun Aug 23 17:40:47 WEST 2026</strong>.</div>
+        <div class="interactionMeta">
+          <button class="scratchIcon" onclick="openScratchpad(1)"><i>◇</i> scratchpad <b>18t</b></button>
+          <span>turn spent 2,145 · context 806/4,096</span>
+        </div>
       </div>
     </div>
 
     <div class="turn" data-turn="2">
       <div class="userline">
         <span class="promptMark">›</span>
-        <span class="usertext">what's the weather today in lisbon?</span>
+        <span class="usertext">excellent - do you know my location?</span>
       </div>
       <div class="assistant">
         <details class="tool">
           <summary>
             <span class="chev">›</span>
-            <span class="toolName">tool.net</span>
-            <span class="toolCmd">curl -s 'wttr.in/Lisbon?format=3'</span>
-            <span class="toolMeta">0.38s</span>
+            <span class="toolName">tool.batch</span>
+            <span class="toolCmd">system timezone · locale · /etc/localtime</span>
+            <span class="toolMeta">0.04s</span>
             <span class="toolState">ok</span>
           </summary>
           <div class="toolBody">
             <div class="toolGrid">
-              <span>request</span><b>GET wttr.in/Lisbon?format=3</b>
-              <span>status</span><b>200</b>
-              <span>duration</span><b>382 ms</b>
-              <span>retained</span><b>1 fact</b>
+              <span>commands</span><b>systemsetup -gettimezone · defaults read AppleLocale · ls -l /etc/localtime</b>
+              <span>exit</span><b>0</b>
+              <span>duration</span><b>40 ms</b>
             </div>
-            <div class="stdout"><strong>Lisbon:</strong> ☀ +22°C</div>
+            <div class="stdout"><strong>locale:</strong> en_PT<br><strong>timezone:</strong> /var/db/timezone/zoneinfo/Europe/Lisbon</div>
             <div class="toolActions">
-              <button class="mini" onclick="copyText(`curl -s 'wttr.in/Lisbon?format=3'`)">copy command</button>
-              <button class="mini" onclick="openScratchpad(2)">scratchpad</button>
-              <button class="mini" onclick="notify('request headers would open here')">headers</button>
+              <button class="mini" onclick="copyText('defaults read /Library/Preferences/.GlobalPreferences AppleLocale')">copy command</button>
+              <button class="mini" onclick="notify('full raw output would open here')">raw output</button>
             </div>
           </div>
         </details>
-        <div class="answer">Lisbon is looking sunny today — ☀ +22°C. Nice and pleasant!</div>
+        <div class="answer">Your system locale is <strong>en_PT</strong> and the timezone is <strong>Europe/Lisbon</strong>, so you're likely in Portugal.</div>
+        <div class="interactionMeta">
+          <button class="scratchIcon" onclick="openScratchpad(2)"><i>◇</i> scratchpad <b>41t</b></button>
+          <span>turn spent 3,629 · context 1,258/4,096</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="turn" data-turn="3">
+      <div class="userline">
+        <span class="promptMark">›</span>
+        <span class="usertext">ok based on my ip can you get like city</span>
+      </div>
+      <div class="assistant">
+        <details class="tool">
+          <summary>
+            <span class="chev">›</span>
+            <span class="toolName">tool.batch</span>
+            <span class="toolCmd">curl -s ipinfo.io</span>
+            <span class="toolMeta">0.26s</span>
+            <span class="toolState">ok</span>
+          </summary>
+          <div class="toolBody">
+            <div class="toolGrid">
+              <span>command</span><b>curl -s ipinfo.io</b>
+              <span>exit</span><b>0</b>
+              <span>duration</span><b>260 ms</b>
+            </div>
+            <div class="stdout"><strong>city:</strong> Coruche<br><strong>region:</strong> Santarém<br><strong>country:</strong> PT<br><strong>postal:</strong> 2100-000</div>
+            <div class="toolActions">
+              <button class="mini" onclick="copyText('curl -s ipinfo.io')">copy command</button>
+              <button class="mini" onclick="notify('full raw output would open here')">raw output</button>
+            </div>
+          </div>
+        </details>
+        <div class="answer">Based on the IP lookup, you're in <strong>Coruche, Santarém, Portugal</strong> (postal code 2100-000).</div>
+        <div class="interactionMeta">
+          <button class="scratchIcon" onclick="openScratchpad(3)"><i>◇</i> scratchpad <b>83t</b></button>
+          <span>turn spent 4,222 · history saved 306 · context 1,346/4,096</span>
+        </div>
       </div>
     </div>
   </div>
@@ -672,13 +729,13 @@ body.hideInspect .inspector{
   </div>
 
   <div class="footer">
-    <span>turns <b id="turns">2</b></span>
-    <span>spent <b id="spent">4,487t</b></span>
-    <span>history saved <b id="saved">0</b></span>
+    <span>turns <b id="turns">3</b></span>
+    <span>spent <b id="spent">9,996t</b></span>
+    <span>history saved <b id="saved">306</b></span>
     <div class="grow"></div>
-    <span>session saved <b id="sessionSaved">0</b></span>
-    <span>tools <b id="tools">2</b></span>
-    <span>last <b id="latency">0.38s</b></span>
+    <span>session saved <b id="sessionSaved">306</b></span>
+    <span>tools <b id="tools">3</b></span>
+    <span>last <b id="latency">12.79s</b></span>
   </div>
 </div>
 
@@ -695,6 +752,7 @@ const inspectToggleBtn = document.getElementById('inspectToggleBtn');
 
 const ctxCount = document.getElementById('ctxCount');
 const histCount = document.getElementById('histCount');
+const scratchCount = document.getElementById('scratchCount');
 const availCount = document.getElementById('availCount');
 const segSystem = document.getElementById('segSystem');
 const segHistory = document.getElementById('segHistory');
@@ -712,36 +770,55 @@ const inspectorTitle = document.getElementById('inspectorTitle');
 const inspectorMeta = document.getElementById('inspectorMeta');
 const inspectorBody = document.getElementById('inspectorBody');
 
-let sys=244, hist=701, scratch=64;
-let turns=2, spent=4487, tools=2, busy=false;
+let sys=917, hist=346, scratch=83;
+let turns=3, spent=9996, saved=306, tools=3, busy=false;
 let toolsVisible=true;
 let inspectVisible=true;
 
 const scratchpads = {
   1: {
-    title: 'scratchpad · turn 1',
-    meta: 'tests',
-    body: `goal: report only what matters
+    title: 'scratchpad · interaction 1',
+    meta: '18 provider tokens · generation response',
+    tokens: 18,
+    source: 'provider',
+    body: `goal: report the current local time
 plan:
-- run the test suite
-- collapse noisy output
-- retain only pass/fail summary
+- query the system clock
+- retain the timezone and timestamp
 
 retained:
-- cargo test completed successfully
-- 18 passed, 0 failed`
+- Sun Aug 23 17:40:47 WEST 2026`
   },
   2: {
-    title: 'scratchpad · turn 2',
-    meta: 'weather',
-    body: `goal: answer the weather request quickly
+    title: 'scratchpad · interaction 2',
+    meta: '41 provider tokens · generation response',
+    tokens: 41,
+    source: 'provider',
+    body: `goal: infer the user's location from local settings
 plan:
-- hit wttr.in with compact format
-- retain one concise weather fact
-- respond in a friendly tone
+- inspect locale and timezone without network access
+- distinguish system configuration from precise location
 
 retained:
-- Lisbon: ☀ +22°C`
+- locale en_PT
+- timezone Europe/Lisbon
+- likely country Portugal`
+  },
+  3: {
+    title: 'scratchpad · interaction 3',
+    meta: '83 provider tokens · generation response',
+    tokens: 83,
+    source: 'provider',
+    body: `goal: resolve the approximate city from the public IP
+plan:
+- query a compact IP metadata endpoint
+- retain only location fields needed for the answer
+
+retained:
+- city Coruche
+- region Santarém
+- country Portugal
+- postal code 2100-000`
   }
 };
 
@@ -856,6 +933,7 @@ function updateContext(delta=0){
   const total=sys+hist+scratch;
   ctxCount.textContent=`${total.toLocaleString()} / 4,096`;
   histCount.textContent=hist.toLocaleString();
+  scratchCount.textContent=scratch.toLocaleString();
   availCount.textContent=(4096-total).toLocaleString();
   segSystem.style.width=(sys/4096*100)+'%';
   segHistory.style.width=(hist/4096*100)+'%';
@@ -865,8 +943,8 @@ function updateFooter(){
   turnsEl.textContent=turns;
   spentEl.textContent=spent.toLocaleString()+'t';
   toolsEl.textContent=tools;
-  savedEl.textContent='0';
-  sessionSavedEl.textContent='0';
+  savedEl.textContent=saved.toLocaleString();
+  sessionSavedEl.textContent=saved.toLocaleString();
 }
 function updateToolVisibility(){
   document.body.classList.toggle('hideTools', !toolsVisible);
@@ -909,11 +987,11 @@ function openScratchpad(turnId){
 }
 document.getElementById('inspectorClose').onclick=()=>inspector.classList.remove('open');
 
-function toolMarkup(kind, cmd, stdout, duration='0.44s', extra={}, turnId=3){
+function toolMarkup(kind, cmd, stdout, duration='0.44s', extra={}){
   const name=kind==='net'?'tool.net':'tool.shell';
   const cwd=extra.cwd||'~/vyrn';
   return `
-  <details class="tool" open>
+  <details class="tool">
     <summary>
       <span class="chev">›</span>
       <span class="toolName">${name}</span>
@@ -932,11 +1010,18 @@ function toolMarkup(kind, cmd, stdout, duration='0.44s', extra={}, turnId=3){
       <div class="stdout">${stdout}</div>
       <div class="toolActions">
         <button class="mini" onclick="copyText(${JSON.stringify(cmd)})">copy command</button>
-        <button class="mini" onclick="openScratchpad(${turnId})">scratchpad</button>
         <button class="mini" onclick="notify('raw detail view simulated')">raw detail</button>
       </div>
     </div>
   </details>`;
+}
+function scratchpadMarkup(turnId){
+  const data=scratchpads[turnId];
+  if(!data) return '';
+  return `<div class="interactionMeta">
+    <button class="scratchIcon" onclick="openScratchpad(${turnId})"><i>◇</i> scratchpad <b>${data.tokens}t</b></button>
+    <span>${data.source} count from scratchpad generation response · click to inspect this interaction</span>
+  </div>`;
 }
 function appendUser(text){
   const turnId = Object.keys(scratchpads).length + 1;
@@ -1056,10 +1141,17 @@ retained:
 - cargo,curl,git,node,python3,rust`;
   }
 
+  const scratchpadResponse = {
+    choices: [{message: {content: scratchBody}}],
+    usage: {completion_tokens: Math.max(1, Math.ceil(scratchBody.length / 4))}
+  };
+  const scratchTokens = scratchpadResponse.usage.completion_tokens;
   scratchpads[turnId] = {
-    title: `scratchpad · turn ${turnId}`,
-    meta: 'current',
-    body: scratchBody
+    title: `scratchpad · interaction ${turnId}`,
+    meta: `${scratchTokens} provider tokens · generation response`,
+    tokens: scratchTokens,
+    source: 'provider',
+    body: scratchpadResponse.choices[0].message.content
   };
 
   const start=performance.now();
@@ -1075,16 +1167,17 @@ retained:
     setTimeout(()=>{
       const duration=((performance.now()-start)/1000).toFixed(2)+'s';
       finish(resp,
-        toolMarkup(kind,cmd,stdout,duration,meta,turnId)+
-        `<div class="answer">${answer}</div>`
+        toolMarkup(kind,cmd,stdout,duration,meta)+
+        `<div class="answer">${answer}</div>`+
+        scratchpadMarkup(turnId)
       );
       tools++;
       turns++;
       spent+=310+Math.floor(Math.random()*180);
+      scratch=scratchTokens;
       updateContext(96+Math.floor(Math.random()*60));
       updateFooter();
       latencyEl.textContent=duration;
-      openScratchpad(turnId);
     }, 1200);
   },700);
 }
@@ -1101,7 +1194,7 @@ function send(text=input.value.trim(), forcedKind=null){
 }
 function clearSession(){
   [...transcript.querySelectorAll('.turn')].forEach(n=>n.remove());
-  hist=0; scratch=64; turns=0; spent=0; tools=0;
+  hist=0; scratch=0; turns=0; spent=0; saved=0; tools=0;
   updateContext(0); updateFooter();
   busy=false; sendBtn.disabled=false;
   notify('session cleared');
@@ -1170,7 +1263,6 @@ updateContext(0);
 updateFooter();
 updateToolVisibility();
 updateInspectVisibility();
-openScratchpad(2);
 </script>
 </body>
 </html>

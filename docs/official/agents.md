@@ -84,6 +84,8 @@ vyrn --models
 ## Important Runtime Contract
 
 - vyrn is an interactive terminal agent, not a GUI or hosted service.
+- `vyrn` keeps the native-scrollback interface by default; `vyrn tui` is the
+  opt-in full-screen interface preview.
 - Keep the always-loaded tool surface minimal.
 - Prefer `batch` for host work that does not need a dedicated compact tool.
 - Use `ask_user` only when a human decision materially changes the next action; facts should be discovered with tools.
