@@ -41,7 +41,7 @@ api_key = ""
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(b"/help\n/context\n/scratchpad\n/debug\n/exit\n")
+        .write_all(b"/help\n/context\n/summary\n/scratchpad\n/debug\n/exit\n")
         .unwrap();
     let output = child.wait_with_output().unwrap();
 
@@ -55,9 +55,14 @@ api_key = ""
         stdout.contains("/scratchpad  show the last evolving turn scratchpad"),
         "{stdout}"
     );
+    assert!(
+        stdout.contains("/summary     show the current rolling summary"),
+        "{stdout}"
+    );
     assert!(stdout.contains("context (estimated): 0/4096"), "{stdout}");
     assert!(stdout.contains("available: 4096"), "{stdout}");
     assert!(stdout.contains("turn scratchpad: none"), "{stdout}");
+    assert!(stdout.contains("rolling summary: none"), "{stdout}");
     assert!(stdout.contains("debug trace:"), "{stdout}");
     assert!(stdout.contains(".vyrn/debug/sessions/"), "{stdout}");
 }
@@ -226,8 +231,8 @@ api_key = ""
     wait_for_pty_output(&output, "exit vyrn", 5);
 
     // SGR mouse coordinates are one-based. With the fixed 120x30 PTY, /exit is
-    // the twelfth palette row beneath the composer anchored at row 11.
-    master.write_all(b"\x1b[<0;5;23m").unwrap();
+    // the thirteenth palette row beneath the composer anchored at row 11.
+    master.write_all(b"\x1b[<0;5;24m").unwrap();
     master.flush().unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -311,11 +316,11 @@ api_key = ""
     wait_for_pty_output_count(&output, "expanded", 1, 5);
 
     // The boxed scratchpad button toggles its already-open panel closed, then open.
-    master.write_all(b"\x1b[<0;35;8M").unwrap();
+    master.write_all(b"\x1b[<0;48;8M").unwrap();
     master.flush().unwrap();
     wait_for_pty_output_count(&output, "collapsed", 2, 5);
 
-    master.write_all(b"\x1b[<0;35;8M").unwrap();
+    master.write_all(b"\x1b[<0;48;8M").unwrap();
     master.flush().unwrap();
     wait_for_pty_output_count(&output, "expanded", 2, 5);
 
@@ -425,7 +430,7 @@ api_key = ""
 
     // The selected boxed scratchpad control remains clickable while the model
     // response is deliberately held open by the test server.
-    master.write_all(b"\x1b[<0;35;8M").unwrap();
+    master.write_all(b"\x1b[<0;48;8M").unwrap();
     master.flush().unwrap();
     wait_for_pty_output(&output, "inspector collaps", 5);
 

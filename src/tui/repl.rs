@@ -6,7 +6,7 @@ use crate::agent::tokens::{
 use crate::agent::transcript::{Exchange, truncate};
 use crate::agent::turn::{
     TurnScratchpad, apply_live_steering_to_tool_batch, build_turn_messages, live_steering_message,
-    prepare_next_turn_context, update_turn_scratchpad,
+    prepare_next_turn_context, render_turn_scratchpad, update_turn_scratchpad,
 };
 use crate::app::App;
 use crate::config::{ConfigSources, ModelProfile, ModelRegistry, ModelState};
@@ -59,6 +59,10 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/context",
         description: "context used, available, and retained",
+    },
+    SlashCommand {
+        name: "/summary",
+        description: "show the current rolling summary",
     },
     SlashCommand {
         name: "/scratchpad",
@@ -183,6 +187,7 @@ pub(super) struct ReplSnapshot {
     pub skills: String,
     pub stats: String,
     pub context: String,
+    pub summary: String,
     pub scratchpad: String,
     pub debug: String,
     pub models: Vec<String>,
@@ -356,7 +361,7 @@ impl Repl {
                                 Arc::clone(&active_input_buffer),
                             ));
                         }
-                        TuiUpdate::SummaryDone => {
+                        TuiUpdate::SummaryDone { .. } => {
                             if let Some(spinner) = spinner.take() {
                                 spinner.stop();
                             }
@@ -508,6 +513,10 @@ impl Repl {
                 println!("{}", self.context_text());
                 Ok(false)
             }
+            "/summary" => {
+                println!("{}", self.rolling_summary_text());
+                Ok(false)
+            }
             "/scratchpad" => {
                 println!("{}", self.scratchpad_text());
                 Ok(false)
@@ -581,6 +590,10 @@ impl Repl {
                 print_system_block(&self.context_text())?;
                 Ok(false)
             }
+            "/summary" => {
+                print_system_block(&self.rolling_summary_text())?;
+                Ok(false)
+            }
             "/scratchpad" => {
                 print_system_block(&self.scratchpad_text())?;
                 Ok(false)
@@ -634,7 +647,7 @@ impl Repl {
                 println!("[integrating previous turn...] ");
                 let _ = std::io::stdout().flush();
             }
-            TuiUpdate::SummaryDone => {}
+            TuiUpdate::SummaryDone { .. } => {}
             TuiUpdate::AssistantDelta(delta) => {
                 print!("{delta}");
                 let _ = std::io::stdout().flush();
@@ -795,7 +808,19 @@ impl Repl {
                 ));
             }
         }
-        emit(TuiUpdate::SummaryDone);
+        let rolling_summary = self
+            .app
+            .context
+            .summary()
+            .filter(|summary| !summary.trim().is_empty())
+            .map(str::to_string);
+        let retained_tokens = rolling_summary.as_deref().map(|summary| {
+            TokenCount::estimate(crate::agent::tokens::estimate_text_tokens(summary))
+        });
+        emit(TuiUpdate::SummaryDone {
+            summary: rolling_summary,
+            retained_tokens,
+        });
 
         let prompt_memory = self.app.context.prompt_memory();
         let prompt = build_agent_prompt(
@@ -1125,11 +1150,12 @@ impl Repl {
             }
             emit(TuiUpdate::ScratchpadStart);
             scratchpad = update_turn_scratchpad(&scratchpad, &current_tool_batch);
+            let rendered_scratchpad = render_turn_scratchpad(&scratchpad);
             self.last_scratchpad_tokens = TokenCount::estimate(
-                crate::agent::tokens::estimate_text_tokens(&scratchpad.summary),
+                crate::agent::tokens::estimate_text_tokens(&rendered_scratchpad),
             );
             emit(TuiUpdate::ScratchpadDone {
-                summary: Some(scratchpad.summary.clone()),
+                summary: Some(rendered_scratchpad.clone()),
                 output_tokens: Some(self.last_scratchpad_tokens),
             });
             self.last_scratchpad = scratchpad.clone();
@@ -1139,7 +1165,7 @@ impl Repl {
                 tool_count,
                 self.last_scratchpad_tokens.tokens,
                 self.last_scratchpad_tokens.source.label(),
-                scratchpad.summary.chars().count()
+                rendered_scratchpad.chars().count()
             ));
             let next_context = prepare_next_turn_context(
                 &base_messages,
@@ -1150,6 +1176,10 @@ impl Repl {
             )?;
             scratchpad = next_context.scratchpad;
             self.last_scratchpad = scratchpad.clone();
+            let rendered_scratchpad = render_turn_scratchpad(&scratchpad);
+            self.last_scratchpad_tokens = TokenCount::estimate(
+                crate::agent::tokens::estimate_text_tokens(&rendered_scratchpad),
+            );
             current_tool_batch = next_context.tool_batch;
             let preparation = next_context.preparation;
             self.debug_log(format!(
@@ -1160,7 +1190,7 @@ impl Repl {
                 preparation.after_tokens,
                 preparation.threshold,
                 preparation.max_tokens,
-                crate::agent::tokens::estimate_text_tokens(&scratchpad.summary),
+                crate::agent::tokens::estimate_text_tokens(&rendered_scratchpad),
                 current_tool_batch.len()
             ));
             if round + 1 == MAX_TOOL_ROUNDS {
@@ -1175,7 +1205,7 @@ impl Repl {
                 &steering_inputs,
             ),
             assistant_text,
-            turn_scratchpad: scratchpad.summary.clone(),
+            turn_scratchpad: render_turn_scratchpad(&scratchpad),
             tool_calls: all_tool_calls,
             tool_results: all_tool_results,
         });
@@ -1557,15 +1587,32 @@ impl Repl {
     }
 
     fn scratchpad_text(&self) -> String {
-        if self.last_scratchpad.summary.trim().is_empty() {
+        let rendered_scratchpad = render_turn_scratchpad(&self.last_scratchpad);
+        if rendered_scratchpad.is_empty() {
             "turn scratchpad: none (no tool-driven context has been compacted yet)".to_string()
         } else {
             format!(
                 "turn scratchpad ({} estimated tokens, deterministic checkpoint):\n{}",
-                self.last_scratchpad_tokens.tokens,
-                self.last_scratchpad.summary.trim()
+                self.last_scratchpad_tokens.tokens, rendered_scratchpad
             )
         }
+    }
+
+    fn rolling_summary_text(&self) -> String {
+        let Some(summary) = self
+            .app
+            .context
+            .summary()
+            .filter(|summary| !summary.trim().is_empty())
+        else {
+            return "rolling summary: none (the first turn has no previous exchange to summarize)"
+                .to_string();
+        };
+        format!(
+            "rolling summary ({} estimated retained tokens; model-generated):\n{}",
+            crate::agent::tokens::estimate_text_tokens(summary),
+            summary.trim()
+        )
     }
 
     fn debug_status_text(&self) -> String {
@@ -1638,6 +1685,7 @@ impl Repl {
             skills: self.skills_text(),
             stats: self.full_stats_text(),
             context: self.context_text(),
+            summary: self.rolling_summary_text(),
             scratchpad: self.scratchpad_text(),
             debug: self.debug_status_text(),
             models: self
@@ -1979,7 +2027,10 @@ fn prompt_optional(label: &str) -> anyhow::Result<String> {
 #[derive(Debug, Clone)]
 pub(super) enum TuiUpdate {
     SummaryStart,
-    SummaryDone,
+    SummaryDone {
+        summary: Option<String>,
+        retained_tokens: Option<TokenCount>,
+    },
     AssistantStart,
     AssistantDelta(String),
     AssistantDone,
@@ -4043,6 +4094,7 @@ mod tests {
         assert!(names.contains(&"/help"));
         assert!(names.contains(&"/stats"));
         assert!(names.contains(&"/context"));
+        assert!(names.contains(&"/summary"));
         assert!(names.contains(&"/scratchpad"));
         assert!(names.contains(&"/debug"));
     }
@@ -4101,8 +4153,14 @@ mod tests {
         assert_eq!(resized.palette_len, 4);
         assert_eq!(resized.palette_start, SLASH_COMMANDS.len() - 4);
         assert_eq!(resized.origin_row, 0);
-        assert_eq!(resized.palette_index_at(23, 1), Some(8));
-        assert_eq!(resized.palette_index_at(23, 4), Some(11));
+        assert_eq!(
+            resized.palette_index_at(23, 1),
+            Some(SLASH_COMMANDS.len() - 4)
+        );
+        assert_eq!(
+            resized.palette_index_at(23, 4),
+            Some(SLASH_COMMANDS.len() - 1)
+        );
         assert_eq!(resized.palette_index_at(24, 4), None);
         assert_eq!(resized.palette_index_at(2, 5), None);
 

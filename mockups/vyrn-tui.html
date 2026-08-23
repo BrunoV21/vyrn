@@ -332,6 +332,7 @@ body.showShortcuts .inspectBtn .shortcutTag{display:block; top:-12px; right:auto
 .scratchIcon:hover{border-color:var(--accent);color:var(--text)}
 .scratchIcon i{font-style:normal;color:#A78BFA}
 .scratchIcon b{font-weight:500;color:var(--muted)}
+.summaryIcon i{color:#7DA2C2}
 
 .thinking{
   display:inline-flex;gap:5px;align-items:center;color:#7d6bd1;font-size:12px;padding:4px 0;
@@ -568,7 +569,8 @@ body.hideInspect .inspector{
     <button class="inspectBtn" data-inspect="help">/help<span class="shortcutTag">⌥H</span></button>
     <button class="inspectBtn" data-inspect="stats">/stats<span class="shortcutTag">⌥S</span></button>
     <button class="inspectBtn" data-inspect="context">/context<span class="shortcutTag">⌥K</span></button>
-    <button class="inspectBtn current" data-inspect="scratchpad">/scratchpad<span class="shortcutTag">⌥P</span></button>
+    <button class="inspectBtn current" data-inspect="summary">/summary<span class="shortcutTag">⌥R</span></button>
+    <button class="inspectBtn" data-inspect="scratchpad">/scratchpad<span class="shortcutTag">⌥P</span></button>
     <button class="inspectBtn" data-inspect="manifest">/manifest<span class="shortcutTag">⌥I</span></button>
     <button class="inspectBtn" data-inspect="skills">/skills<span class="shortcutTag">⌥L</span></button>
     <button class="inspectBtn" data-inspect="debug">/debug<span class="shortcutTag">⌥D</span></button>
@@ -580,9 +582,9 @@ body.hideInspect .inspector{
   <div class="inspector" id="inspector">
     <div class="inspectorHead">
       <span>inspect</span>
-      <b id="inspectorTitle">scratchpad</b>
+      <b id="inspectorTitle">rolling summary · interaction 3</b>
       <div class="grow"></div>
-      <span id="inspectorMeta">last turn</span>
+      <span id="inspectorMeta">53 estimated retained tokens · model-generated</span>
       <button class="inspectorClose" id="inspectorClose">close</button>
     </div>
     <div class="inspectorBody" id="inspectorBody"></div>
@@ -620,6 +622,7 @@ body.hideInspect .inspector{
         </details>
         <div class="answer">It's currently <strong>Sun Aug 23 17:40:47 WEST 2026</strong>.</div>
         <div class="interactionMeta">
+          <button class="scratchIcon summaryIcon" onclick="openRollingSummary(1)"><i>≋</i> rolling summary <b>none</b></button>
           <button class="scratchIcon" onclick="openScratchpad(1)"><i>◇</i> scratchpad <b>18t</b></button>
           <span>turn spent 2,145 · context 806/4,096</span>
         </div>
@@ -656,6 +659,7 @@ body.hideInspect .inspector{
         </details>
         <div class="answer">Your system locale is <strong>en_PT</strong> and the timezone is <strong>Europe/Lisbon</strong>, so you're likely in Portugal.</div>
         <div class="interactionMeta">
+          <button class="scratchIcon summaryIcon" onclick="openRollingSummary(2)"><i>≋</i> rolling summary <b>31t</b></button>
           <button class="scratchIcon" onclick="openScratchpad(2)"><i>◇</i> scratchpad <b>41t</b></button>
           <span>turn spent 3,629 · context 1,258/4,096</span>
         </div>
@@ -692,6 +696,7 @@ body.hideInspect .inspector{
         </details>
         <div class="answer">Based on the IP lookup, you're in <strong>Coruche, Santarém, Portugal</strong> (postal code 2100-000).</div>
         <div class="interactionMeta">
+          <button class="scratchIcon summaryIcon" onclick="openRollingSummary(3)"><i>≋</i> rolling summary <b>53t</b></button>
           <button class="scratchIcon" onclick="openScratchpad(3)"><i>◇</i> scratchpad <b>83t</b></button>
           <span>turn spent 4,222 · history saved 306 · context 1,346/4,096</span>
         </div>
@@ -704,6 +709,7 @@ body.hideInspect .inspector{
       <div class="command" data-command="/help"><code>/help</code><span>list commands and keyboard controls</span><small>↵</small></div>
       <div class="command" data-command="/stats"><code>/stats</code><span>provider usage, estimates, and savings</span><small>↵</small></div>
       <div class="command" data-command="/context"><code>/context</code><span>context used, available, and retained</span><small>↵</small></div>
+      <div class="command" data-command="/summary"><code>/summary</code><span>show the current rolling summary</span><small>↵</small></div>
       <div class="command" data-command="/scratchpad"><code>/scratchpad</code><span>show the last evolving turn scratchpad</span><small>↵</small></div>
       <div class="command" data-command="/models"><code>/models</code><span>switch model profile (/model alias)</span><small>↵</small></div>
       <div class="command" data-command="/model"><code>/model</code><span>alias for /models</span><small>↵</small></div>
@@ -778,12 +784,43 @@ let turns=3, spent=9996, saved=306, tools=3, busy=false;
 let toolsVisible=true;
 let inspectVisible=true;
 
+const rollingSummaries = {
+  1: {
+    title: 'rolling summary · interaction 1',
+    meta: 'none · no previous exchange',
+    tokens: 0,
+    body: `No rolling summary was supplied to interaction 1 because there was no previous exchange to summarize.`
+  },
+  2: {
+    title: 'rolling summary · interaction 2',
+    meta: '31 estimated retained tokens · model-generated',
+    tokens: 31,
+    body: `Session goal: answer the user's local environment questions concisely.
+
+Conversation so far:
+- The user asked for the current time.
+- The system clock returned Sun Aug 23 17:40:47 WEST 2026.
+- The assistant reported that timestamp.`
+  },
+  3: {
+    title: 'rolling summary · interaction 3',
+    meta: '53 estimated retained tokens · model-generated',
+    tokens: 53,
+    body: `Session goal: answer the user's local environment and location questions concisely.
+
+Conversation so far:
+- The current local time was Sun Aug 23 17:40:47 WEST 2026.
+- System inspection found locale en_PT and timezone Europe/Lisbon.
+- The assistant explained that these settings suggest Portugal but do not establish a precise city.`
+  }
+};
+
 const scratchpads = {
   1: {
     title: 'scratchpad · interaction 1',
-    meta: '18 provider tokens · generation response',
+    meta: '18 estimated retained tokens · deterministic checkpoint',
     tokens: 18,
-    source: 'provider',
+    source: 'estimate',
     body: `goal: report the current local time
 plan:
 - query the system clock
@@ -794,9 +831,9 @@ retained:
   },
   2: {
     title: 'scratchpad · interaction 2',
-    meta: '41 provider tokens · generation response',
+    meta: '41 estimated retained tokens · deterministic checkpoint',
     tokens: 41,
-    source: 'provider',
+    source: 'estimate',
     body: `goal: infer the user's location from local settings
 plan:
 - inspect locale and timezone without network access
@@ -809,9 +846,9 @@ retained:
   },
   3: {
     title: 'scratchpad · interaction 3',
-    meta: '83 provider tokens · generation response',
+    meta: '83 estimated retained tokens · deterministic checkpoint',
     tokens: 83,
-    source: 'provider',
+    source: 'estimate',
     body: `goal: resolve the approximate city from the public IP
 plan:
 - query a compact IP metadata endpoint
@@ -832,6 +869,7 @@ const inspectData = {
     body: `/help        list commands and keyboard controls
 /stats       provider usage, estimates, and savings
 /context     context used, available, and retained
+/summary     show the current rolling summary
 /scratchpad  show the last evolving turn scratchpad
 /models      switch model profile (/model alias)
 /model       alias for /models
@@ -858,7 +896,7 @@ no completed requests yet`
     meta: 'ledger',
     body: `sys context (estimated): ${(sys+hist+scratch).toLocaleString()}/4096
 sys provider-reported session tokens: 0
-sys rolling summary (estimated): 0
+sys rolling summary (estimated): ${rollingSummaries[3].tokens}
 sys retained scratchpad: ${scratch}
 sys retained history: ${hist}
 available: ${(4096-(sys+hist+scratch)).toLocaleString()}`
@@ -982,6 +1020,12 @@ function openInspectKey(key){
   document.querySelectorAll('.inspectBtn').forEach(btn => btn.classList.toggle('current', btn.dataset.inspect===key));
   openInspector(data.title, data.meta, data.body);
 }
+function openRollingSummary(turnId){
+  const data=rollingSummaries[turnId];
+  if(!data) return;
+  document.querySelectorAll('.inspectBtn').forEach(btn => btn.classList.toggle('current', btn.dataset.inspect==='summary'));
+  openInspector(data.title, data.meta, data.body);
+}
 function openScratchpad(turnId){
   const data=scratchpads[turnId];
   if(!data) return;
@@ -1023,12 +1067,24 @@ function scratchpadMarkup(turnId){
   const data=scratchpads[turnId];
   if(!data) return '';
   return `<div class="interactionMeta">
+    <button class="scratchIcon summaryIcon" onclick="openRollingSummary(${turnId})"><i>≋</i> rolling summary <b>${rollingSummaries[turnId]?.tokens ? rollingSummaries[turnId].tokens+'t' : 'none'}</b></button>
     <button class="scratchIcon" onclick="openScratchpad(${turnId})"><i>◇</i> scratchpad <b>${data.tokens}t</b></button>
-    <span>${data.source} count from scratchpad generation response · click to inspect this interaction</span>
+    <span>estimated retained footprints · click to inspect this interaction</span>
   </div>`;
 }
 function appendUser(text){
   const turnId = Object.keys(scratchpads).length + 1;
+  const previous = rollingSummaries[turnId - 1];
+  const previousTurn = transcript.querySelector(`.turn[data-turn="${turnId - 1}"]`);
+  const previousUser = previousTurn?.querySelector('.usertext')?.textContent?.trim() || 'No earlier request';
+  const previousAnswer = previousTurn?.querySelector('.answer')?.textContent?.trim() || 'No earlier response';
+  const summaryBody = `Session goal: continue helping with the current local task.\n\nEarlier retained context:\n${previous?.body || 'None'}\n\nLatest completed exchange:\n- User: ${previousUser}\n- Assistant: ${previousAnswer}`;
+  rollingSummaries[turnId] = {
+    title: `rolling summary · interaction ${turnId}`,
+    meta: `${Math.max(1, Math.ceil(summaryBody.length / 4))} estimated retained tokens · model-generated`,
+    tokens: Math.max(1, Math.ceil(summaryBody.length / 4)),
+    body: summaryBody
+  };
   const turn=document.createElement('div');
   turn.className='turn';
   turn.dataset.turn=turnId;
@@ -1073,10 +1129,11 @@ function runCommand(resp, text, turnId){
   const cmd=text.trim().split(/\s+/)[0];
   setTimeout(()=>{
     if(cmd==='/help'){
-      finish(resp, `<div class="answer">Use <code>/</code> or ⌘/ctrl+k for the full command palette.\nHold <code>⌥</code> to reveal shortcuts.\nUse the inspect row for /stats, /context, /scratchpad, /manifest, /skills, and /debug.</div>`);
+      finish(resp, `<div class="answer">Use <code>/</code> or ⌘/ctrl+k for the full command palette.\nHold <code>⌥</code> to reveal shortcuts.\nUse the inspect row for /stats, /context, /summary, /scratchpad, /manifest, /skills, and /debug.</div>`);
       openInspectKey('help');
     } else if(cmd==='/stats'){ finish(resp, `<div class="answer">stats opened in inspector.</div>`); openInspectKey('stats');
     } else if(cmd==='/context'){ finish(resp, `<div class="answer">context ledger opened in inspector.</div>`); openInspectKey('context');
+    } else if(cmd==='/summary'){ finish(resp, `<div class="answer">current rolling summary opened in inspector.</div>`); openRollingSummary(turnId);
     } else if(cmd==='/scratchpad'){ finish(resp, `<div class="answer">latest scratchpad opened in inspector.</div>`); openScratchpad(Object.keys(scratchpads).length);
     } else if(cmd==='/manifest'){ finish(resp, `<div class="answer">machine manifest opened in inspector.</div>`); openInspectKey('manifest');
     } else if(cmd==='/skills'){ finish(resp, `<div class="answer">skills opened in inspector.</div>`); openInspectKey('skills');
@@ -1145,17 +1202,13 @@ retained:
 - cargo,curl,git,node,python3,rust`;
   }
 
-  const scratchpadResponse = {
-    choices: [{message: {content: scratchBody}}],
-    usage: {completion_tokens: Math.max(1, Math.ceil(scratchBody.length / 4))}
-  };
-  const scratchTokens = scratchpadResponse.usage.completion_tokens;
+  const scratchTokens = Math.max(1, Math.ceil(scratchBody.length / 4));
   scratchpads[turnId] = {
     title: `scratchpad · interaction ${turnId}`,
-    meta: `${scratchTokens} provider tokens · generation response`,
+    meta: `${scratchTokens} estimated retained tokens · deterministic checkpoint`,
     tokens: scratchTokens,
-    source: 'provider',
-    body: scratchpadResponse.choices[0].message.content
+    source: 'estimate',
+    body: scratchBody
   };
 
   const start=performance.now();
@@ -1228,6 +1281,7 @@ document.addEventListener('keydown',e=>{
     if(k==='h'){ e.preventDefault(); openInspectKey('help'); }
     if(k==='s'){ e.preventDefault(); openInspectKey('stats'); }
     if(k==='k'){ e.preventDefault(); openInspectKey('context'); }
+    if(k==='r'){ e.preventDefault(); openRollingSummary(Object.keys(rollingSummaries).length); }
     if(k==='p'){ e.preventDefault(); openScratchpad(Object.keys(scratchpads).length); }
     if(k==='i'){ e.preventDefault(); openInspectKey('manifest'); }
     if(k==='l'){ e.preventDefault(); openInspectKey('skills'); }
@@ -1258,11 +1312,13 @@ document.querySelectorAll('.command').forEach(row=>{
 document.querySelectorAll('.inspectBtn').forEach(btn=>{
   btn.onclick=()=>{
     const key = btn.dataset.inspect;
-    if(key==='scratchpad') openScratchpad(Object.keys(scratchpads).length);
+    if(key==='summary') openRollingSummary(Object.keys(rollingSummaries).length);
+    else if(key==='scratchpad') openScratchpad(Object.keys(scratchpads).length);
     else openInspectKey(key);
   };
 });
 
+openRollingSummary(3);
 updateContext(0);
 updateFooter();
 updateToolVisibility();

@@ -43,6 +43,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("/help", "list commands and keyboard controls"),
     CommandSpec::new("/stats", "provider usage, estimates, and savings"),
     CommandSpec::new("/context", "context used, available, and retained"),
+    CommandSpec::new("/summary", "show the current rolling summary"),
     CommandSpec::new("/scratchpad", "show the last evolving turn scratchpad"),
     CommandSpec::new("/models", "switch model profile (/model alias)"),
     CommandSpec::new("/model", "alias for /models"),
@@ -385,6 +386,7 @@ fn activate_click_target(
         | UiClickTarget::ToggleTrace
         | UiClickTarget::ToggleInspect
         | UiClickTarget::Inspector(_)
+        | UiClickTarget::TurnSummary(_)
         | UiClickTarget::TurnScratchpad(_)
         | UiClickTarget::ToolDetails { .. }
         | UiClickTarget::ToolScratchpad { .. } => {
@@ -411,6 +413,7 @@ fn activate_local_click_target(target: UiClickTarget, state: &mut UiState) -> bo
             );
         }
         UiClickTarget::Inspector(key) => toggle_inspector(state, key),
+        UiClickTarget::TurnSummary(turn_index) => state.open_turn_summary(turn_index),
         UiClickTarget::TurnScratchpad(turn_index) => state.open_turn_scratchpad(turn_index),
         UiClickTarget::ToolDetails {
             turn_index,
@@ -480,6 +483,7 @@ fn handle_alt_shortcut(key: KeyEvent, state: &mut UiState, repl: &mut Repl) -> I
         KeyCode::Char('h') => state.open_inspector(InspectorKey::Help),
         KeyCode::Char('s') => state.open_inspector(InspectorKey::Stats),
         KeyCode::Char('k') => state.open_inspector(InspectorKey::Context),
+        KeyCode::Char('r') => state.open_inspector(InspectorKey::Summary),
         KeyCode::Char('p') => state.open_inspector(InspectorKey::Scratchpad),
         KeyCode::Char('i') => state.open_inspector(InspectorKey::Manifest),
         KeyCode::Char('l') => state.open_inspector(InspectorKey::Skills),
@@ -526,6 +530,7 @@ fn run_slash_command(input: &str, state: &mut UiState, repl: &mut Repl) -> IdleA
         "/help" => state.open_inspector(InspectorKey::Help),
         "/stats" => state.open_inspector(InspectorKey::Stats),
         "/context" => state.open_inspector(InspectorKey::Context),
+        "/summary" => state.open_inspector(InspectorKey::Summary),
         "/scratchpad" => state.open_inspector(InspectorKey::Scratchpad),
         "/manifest" => state.open_inspector(InspectorKey::Manifest),
         "/skills" => state.open_inspector(InspectorKey::Skills),
@@ -735,6 +740,7 @@ fn handle_active_mouse_in_area(
             | UiClickTarget::ToggleTrace
             | UiClickTarget::ToggleInspect
             | UiClickTarget::Inspector(_)
+            | UiClickTarget::TurnSummary(_)
             | UiClickTarget::TurnScratchpad(_)
             | UiClickTarget::ToolDetails { .. }
             | UiClickTarget::ToolScratchpad { .. } => {
@@ -899,6 +905,7 @@ enum InspectorKey {
     Help,
     Stats,
     Context,
+    Summary,
     Scratchpad,
     Manifest,
     Skills,
@@ -912,6 +919,7 @@ enum UiClickTarget {
     ToggleInspect,
     Clear,
     Inspector(InspectorKey),
+    TurnSummary(usize),
     TurnScratchpad(usize),
     ToolDetails {
         turn_index: usize,
@@ -945,6 +953,7 @@ impl InspectorKey {
             Self::Help => "help",
             Self::Stats => "stats",
             Self::Context => "context",
+            Self::Summary => "summary",
             Self::Scratchpad => "scratchpad",
             Self::Manifest => "manifest",
             Self::Skills => "skills",
@@ -1138,6 +1147,7 @@ impl UiState {
             image_count: input.images.len(),
             events: Vec::new(),
             stats: None,
+            rolling_summary: None,
             scratchpad: None,
             complete: false,
         });
@@ -1171,7 +1181,7 @@ impl UiState {
         let Some(turn) = self.turns.last_mut() else {
             return;
         };
-        let mut scratchpad_changed = false;
+        let mut inspector_memory_changed = false;
         match update {
             TuiUpdate::SummaryStart => {
                 self.activity = Some("integrating previous turn".to_string());
@@ -1182,7 +1192,17 @@ impl UiState {
                     TraceState::Live,
                 );
             }
-            TuiUpdate::SummaryDone => finish_last_trace(turn, "memory"),
+            TuiUpdate::SummaryDone {
+                summary,
+                retained_tokens,
+            } => {
+                finish_last_trace(turn, "memory");
+                turn.rolling_summary = match (summary, retained_tokens) {
+                    (Some(summary), Some(tokens)) => Some(RollingSummaryView { summary, tokens }),
+                    _ => None,
+                };
+                inspector_memory_changed = true;
+            }
             TuiUpdate::AssistantStart => {
                 self.activity = Some("thinking".to_string());
                 self.spinner_frame = 0;
@@ -1249,7 +1269,7 @@ impl UiState {
                         }
                     }
                     turn.scratchpad = Some(scratchpad);
-                    scratchpad_changed = true;
+                    inspector_memory_changed = true;
                 }
             }
             TuiUpdate::Steering(text) => {
@@ -1265,7 +1285,7 @@ impl UiState {
                 self.activity = Some("waiting for your answer".to_string());
             }
         }
-        if scratchpad_changed {
+        if inspector_memory_changed {
             self.refresh_inspector_body();
         }
         self.follow_transcript = true;
@@ -1303,6 +1323,18 @@ impl UiState {
         self.inspected_tool = None;
         self.refresh_inspector_body();
         self.status = format!("interaction {} scratchpad expanded", turn_index + 1);
+    }
+
+    fn open_turn_summary(&mut self, turn_index: usize) {
+        if self.turns.get(turn_index).is_none() {
+            return;
+        }
+        self.inspect_visible = true;
+        self.inspector = Some(InspectorKey::Summary);
+        self.inspected_turn = Some(turn_index);
+        self.inspected_tool = None;
+        self.refresh_inspector_body();
+        self.status = format!("interaction {} rolling summary expanded", turn_index + 1);
     }
 
     fn open_tool_scratchpad(&mut self, turn_index: usize, event_index: usize) {
@@ -1347,7 +1379,22 @@ impl UiState {
         let Some(key) = self.inspector else {
             return;
         };
-        self.inspector_body = if key == InspectorKey::Scratchpad {
+        self.inspector_body = if key == InspectorKey::Summary {
+            if let Some(index) = self.inspected_turn {
+                self.turns
+                    .get(index)
+                    .and_then(|turn| turn.rolling_summary.as_ref())
+                    .map(|summary| turn_summary_text(index, summary))
+                    .unwrap_or_else(|| {
+                        format!(
+                            "interaction {} rolling summary: none (no previous exchange was available)",
+                            index + 1
+                        )
+                    })
+            } else {
+                self.snapshot.summary.clone()
+            }
+        } else if key == InspectorKey::Scratchpad {
             if let Some((turn_index, event_index)) = self.inspected_tool {
                 self.turns
                     .get(turn_index)
@@ -1549,8 +1596,15 @@ struct TurnView {
     image_count: usize,
     events: Vec<TurnEvent>,
     stats: Option<String>,
+    rolling_summary: Option<RollingSummaryView>,
     scratchpad: Option<ScratchpadView>,
     complete: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RollingSummaryView {
+    summary: String,
+    tokens: TokenCount,
 }
 
 #[derive(Debug, Clone)]
@@ -1646,6 +1700,15 @@ fn turn_scratchpad_text(turn_index: usize, scratchpad: &ScratchpadView) -> Strin
     )
 }
 
+fn turn_summary_text(turn_index: usize, summary: &RollingSummaryView) -> String {
+    format!(
+        "interaction {} rolling summary ({} estimated retained tokens; model-generated):\n{}",
+        turn_index + 1,
+        summary.tokens.tokens,
+        summary.summary.trim()
+    )
+}
+
 fn tool_scratchpad_text(turn_index: usize, tool_name: &str, scratchpad: &ScratchpadView) -> String {
     format!(
         "interaction {} · tool.{} scratchpad ({} estimated tokens, deterministic checkpoint):\n{}",
@@ -1661,6 +1724,7 @@ fn inspector_text(key: InspectorKey, snapshot: &ReplSnapshot) -> String {
         InspectorKey::Help => help_text(),
         InspectorKey::Stats => snapshot.stats.clone(),
         InspectorKey::Context => snapshot.context.clone(),
+        InspectorKey::Summary => snapshot.summary.clone(),
         InspectorKey::Scratchpad => snapshot.scratchpad.clone(),
         InspectorKey::Manifest => snapshot.manifest.clone(),
         InspectorKey::Skills => snapshot.skills.clone(),
@@ -1681,8 +1745,9 @@ fn help_text() -> String {
         "  Ctrl+K / Ctrl+O / F1  command palette".to_string(),
         "  Left click run command · mouse wheel select".to_string(),
         "  Click model/header/inspect controls and model rows".to_string(),
-        "  Click ◇ scratchpad or ▸ tool rows for interaction details".to_string(),
-        "  Alt+T trace · Alt+E inspect · Alt+M models · Alt+C clear".to_string(),
+        "  Click ≋ summary, ◇ scratchpad, or ▸ tool rows for details".to_string(),
+        "  Alt+R summary · Alt+P scratchpad · Alt+T trace · Alt+E inspect".to_string(),
+        "  Alt+M models · Alt+C clear".to_string(),
         "  PageUp/PageDown scroll · End follow latest".to_string(),
         "  Enter send · Shift+Enter newline · Esc exit/cancel".to_string(),
     ]);
@@ -2024,18 +2089,26 @@ fn header_click_regions(area: Rect, state: &UiState) -> Vec<ClickRegion> {
     regions
 }
 
-fn inspect_button_specs() -> [(UiClickTarget, &'static str); 7] {
+fn inspect_button_specs(width: u16) -> [(UiClickTarget, &'static str); 8] {
+    let compact = width < 70;
     [
         (UiClickTarget::Inspector(InspectorKey::Help), "help"),
         (UiClickTarget::Inspector(InspectorKey::Stats), "stats"),
         (UiClickTarget::Inspector(InspectorKey::Context), "context"),
+        (
+            UiClickTarget::Inspector(InspectorKey::Summary),
+            if compact { "sum" } else { "summary" },
+        ),
         (
             UiClickTarget::Inspector(InspectorKey::Scratchpad),
             "scratchpad",
         ),
         (UiClickTarget::Inspector(InspectorKey::Manifest), "manifest"),
         (UiClickTarget::Inspector(InspectorKey::Skills), "skills"),
-        (UiClickTarget::Refresh, "refresh"),
+        (
+            UiClickTarget::Refresh,
+            if compact { "sync" } else { "refresh" },
+        ),
     ]
 }
 
@@ -2047,7 +2120,7 @@ fn inspect_button_width(label: &str, horizontal_padding: u16) -> u16 {
 }
 
 fn inspect_button_spacing(width: u16) -> (u16, u16) {
-    let specs = inspect_button_specs();
+    let specs = inspect_button_specs(width);
     let labels_and_borders = specs
         .iter()
         .map(|(_, label)| inspect_button_width(label, 0))
@@ -2073,7 +2146,7 @@ fn inspect_button_layout(width: u16) -> Vec<(UiClickTarget, &'static str, Rect)>
     let mut layout = Vec::new();
     let mut x = 0_u16;
     let mut y = 0_u16;
-    for (target, label) in inspect_button_specs() {
+    for (target, label) in inspect_button_specs(width) {
         let button_width = inspect_button_width(label, horizontal_padding).min(width);
         if x > 0 && x.saturating_add(gap).saturating_add(button_width) > width {
             x = 0;
@@ -2366,7 +2439,12 @@ fn render_inspector(frame: &mut ratatui::Frame<'_>, area: Rect, state: &UiState)
     let Some(key) = state.inspector else {
         return;
     };
-    let label = if key == InspectorKey::Scratchpad {
+    let label = if key == InspectorKey::Summary {
+        state.inspected_turn.map_or_else(
+            || key.label().to_string(),
+            |index| format!("rolling summary · interaction {}", index + 1),
+        )
+    } else if key == InspectorKey::Scratchpad {
         if let Some((turn_index, event_index)) = state.inspected_tool {
             let tool_name = state
                 .turns
@@ -2637,6 +2715,23 @@ fn transcript_rows(state: &UiState) -> Vec<TranscriptRow> {
             ])));
         }
         if state.inspect_visible {
+            let summary_meta = turn.rolling_summary.as_ref().map_or_else(
+                || "none  [click inspect]".to_string(),
+                |summary| {
+                    format!(
+                        "{} estimated tokens  [click inspect]",
+                        summary.tokens.tokens
+                    )
+                },
+            );
+            rows.push(TranscriptRow::clickable(
+                Line::from(vec![
+                    Span::styled("     ≋ ", Style::default().fg(VY_TECH)),
+                    Span::styled("rolling summary", Style::default().fg(VY_TECH_STRONG)),
+                    Span::styled(format!(" · {summary_meta}"), Style::default().fg(VY_DIM)),
+                ]),
+                UiClickTarget::TurnSummary(turn_index),
+            ));
             let scratchpad_meta = turn.scratchpad.as_ref().map_or_else(
                 || "none  [click inspect]".to_string(),
                 |scratchpad| {
@@ -3316,6 +3411,8 @@ mod tests {
             skills: "skills: none".to_string(),
             stats: "session spent: 4487".to_string(),
             context: "context (estimated): 1009/4096".to_string(),
+            summary: "rolling summary (23 estimated retained tokens; model-generated):\nuser is testing observability"
+                .to_string(),
             scratchpad: "turn scratchpad: retained facts".to_string(),
             debug: "debug trace: /tmp/session.json".to_string(),
             models: vec!["qwen-small".to_string(), "llama-local".to_string()],
@@ -3451,6 +3548,64 @@ mod tests {
     }
 
     #[test]
+    fn every_interaction_keeps_the_rolling_summary_it_received() {
+        let mut state = UiState::new(snapshot());
+        for (index, summary) in [
+            None,
+            Some(("summary supplied to interaction 2", 19)),
+            Some(("summary supplied to interaction 3", 27)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            state.begin_turn(&UserTurnInput {
+                text: format!("interaction {}", index + 1),
+                images: Vec::new(),
+            });
+            state.apply_update(TuiUpdate::SummaryDone {
+                summary: summary.map(|(text, _)| text.to_string()),
+                retained_tokens: summary.map(|(_, tokens)| TokenCount::estimate(tokens)),
+            });
+            state.finish_turn(None);
+        }
+
+        let rows = transcript_rows(&state);
+        assert!(rows.iter().any(|row| {
+            row.target == Some(UiClickTarget::TurnSummary(0))
+                && row.line.to_string().contains("rolling summary · none")
+        }));
+        assert!(rows.iter().any(|row| {
+            row.target == Some(UiClickTarget::TurnSummary(1))
+                && row.line.to_string().contains("19 estimated tokens")
+        }));
+        assert!(rows.iter().any(|row| {
+            row.target == Some(UiClickTarget::TurnSummary(2))
+                && row.line.to_string().contains("27 estimated tokens")
+        }));
+
+        state.open_turn_summary(0);
+        assert!(state.inspector_body.contains("rolling summary: none"));
+        state.open_turn_summary(1);
+        assert!(
+            state
+                .inspector_body
+                .contains("summary supplied to interaction 2")
+        );
+        assert!(
+            state
+                .inspector_body
+                .contains("19 estimated retained tokens")
+        );
+        state.open_turn_summary(2);
+        assert!(
+            state
+                .inspector_body
+                .contains("summary supplied to interaction 3")
+        );
+        assert!(!state.inspector_body.contains("interaction 2"));
+    }
+
+    #[test]
     fn rendered_interaction_disclosures_are_mouse_hit_targets() {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -3467,6 +3622,10 @@ mod tests {
         state.apply_update(TuiUpdate::ToolOk {
             name: "batch".to_string(),
             preview: "Sun Aug 23 17:40:47 WEST 2026".to_string(),
+        });
+        state.apply_update(TuiUpdate::SummaryDone {
+            summary: Some("summary used for this interaction".to_string()),
+            retained_tokens: Some(TokenCount::estimate(24)),
         });
         state.apply_update(TuiUpdate::ScratchpadDone {
             summary: Some("retained exact date".to_string()),
@@ -3487,6 +3646,12 @@ mod tests {
             .find(|region| region.target == UiClickTarget::TurnScratchpad(0))
             .copied()
             .unwrap();
+        let summary = state
+            .transcript_click_regions
+            .iter()
+            .find(|region| region.target == UiClickTarget::TurnSummary(0))
+            .copied()
+            .unwrap();
         assert_eq!(
             transcript_click_target(&state, tool.area.x, tool.area.y),
             Some(tool.target)
@@ -3494,6 +3659,10 @@ mod tests {
         assert_eq!(
             transcript_click_target(&state, scratchpad.area.x, scratchpad.area.y),
             Some(scratchpad.target)
+        );
+        assert_eq!(
+            transcript_click_target(&state, summary.area.x, summary.area.y),
+            Some(summary.target)
         );
 
         activate_local_click_target(tool.target, &mut state);
@@ -3528,6 +3697,15 @@ mod tests {
         assert_eq!(state.inspected_turn, Some(0));
         assert_eq!(state.inspected_tool, None);
         assert!(state.inspector_body.contains("retained exact date"));
+
+        activate_local_click_target(summary.target, &mut state);
+        assert_eq!(state.inspected_turn, Some(0));
+        assert_eq!(state.inspected_tool, None);
+        assert!(
+            state
+                .inspector_body
+                .contains("summary used for this interaction")
+        );
     }
 
     #[test]
@@ -3687,6 +3865,17 @@ mod tests {
     }
 
     #[test]
+    fn command_palette_exposes_the_current_rolling_summary() {
+        let mut state = UiState::new(snapshot());
+        state.input.set("/sum".to_string());
+        state.update_palette();
+
+        assert_eq!(state.palette_matches()[0].name, "/summary");
+        state.accept_palette();
+        assert_eq!(state.input.text, "/summary");
+    }
+
+    #[test]
     fn command_palette_hit_testing_tracks_terminal_resizes() {
         let mut state = UiState::new(snapshot());
         state.input.set("/".to_string());
@@ -3785,7 +3974,7 @@ mod tests {
         let inspect = inspect_strip_click_regions(chunks[2]);
         for target in [
             UiClickTarget::Inspector(InspectorKey::Stats),
-            UiClickTarget::Refresh,
+            UiClickTarget::Inspector(InspectorKey::Summary),
         ] {
             let region = inspect
                 .iter()
@@ -3802,7 +3991,7 @@ mod tests {
                 UiClickTarget::OpenModels | UiClickTarget::Inspector(InspectorKey::Debug)
             )
         }));
-        assert_eq!(inspect.len(), 7);
+        assert_eq!(inspect.len(), 8);
     }
 
     #[test]
@@ -3813,7 +4002,7 @@ mod tests {
         let inspect = inspect_strip_click_regions(chunks[2]);
 
         assert_eq!(chunks[2].height, 3);
-        assert_eq!(inspect.len(), 7);
+        assert_eq!(inspect.len(), 8);
         assert!(inspect.iter().all(|region| region.area.height == 3));
         assert!(inspect.windows(2).all(|regions| {
             regions[0].area.y == regions[1].area.y && regions[0].area.right() <= regions[1].area.x
