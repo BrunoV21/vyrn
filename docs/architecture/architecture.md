@@ -231,7 +231,7 @@ The system prompt has four compact sections:
 
 ```text
 [role] terminal coding agent. conserve tokens.
-[rules] use tools when needed. use read_image for image files. prefer batch for shell. keep outputs compact.
+[rules] use tools when needed. trust tool results; do not invent missing facts. use read_image for image files. prefer batch for shell. keep outputs compact.
 [tools] {{tools}}
 {{manifest}}
 {{available_skills}}
@@ -275,9 +275,10 @@ Each user request follows this sequence:
 5. Stream assistant output.
 6. Accumulate tool calls.
 7. Execute requested tools.
-8. Send tool results back to the model until it returns a final answer.
-9. Persist the latest exchange into transcript memory.
-10. Print token stats.
+8. Update a bounded deterministic tool checkpoint and prune at 70% of budget.
+9. Send tool results back to the model until it returns a final answer.
+10. Persist the latest exchange and exact tool checkpoint into transcript memory.
+11. Print token stats.
 ```
 
 Tool calls may require multiple model round trips in one user turn. Token accounting
@@ -292,6 +293,7 @@ pub struct TurnState {
     pub assistant_text: String,
     pub tool_calls: Vec<ToolCall>,
     pub tool_results: Vec<ToolResult>,
+    pub turn_scratchpad: String,
     pub usage: TurnUsage,
 }
 ```
@@ -305,6 +307,7 @@ available through the rolling summary or discarded according to pruning policy.
 
 - current rolling summary
 - previous raw exchange
+- bounded meaningful-goal and authoritative tool-memory anchors
 - configured aggressiveness
 - context budget
 - token estimator
@@ -313,6 +316,8 @@ available through the rolling summary or discarded according to pruning policy.
 pub struct ContextManager {
     summary: Option<String>,
     previous_exchange: Option<Exchange>,
+    session_goal: Option<String>,
+    exact_tool_memory: Option<String>,
     policy: SummaryPolicy,
     max_tokens: usize,
 }
@@ -709,8 +714,8 @@ Follow the PRD phases, but build vertical slices that can run end to end.
 |---|---|
 | Small models emit malformed tool calls. | Keep schemas simple, retry with compact correction, and show raw errors in verbose mode. |
 | Token estimates differ by endpoint. | Treat local counts as estimates and prefer provider usage when returned. |
-| Summary loses important task state. | Always preserve original goal, touched paths, decisions, and open tasks in the summary prompt. |
-| `batch` output overwhelms context. | Display full output to terminal but summarize or truncate result payload sent back to the model. |
+| Summary loses important task state. | Preserve bounded meaningful-goal, recent-exchange, and exact tool checkpoints outside the model-authored summary; fall back deterministically on capped summary output. |
+| `batch` output overwhelms context. | Preserve bounded head-and-tail checkpoints and start pruning result payloads at 70% of the configured context. |
 | MCP eager mode defeats token goals. | Make eager explicit per server and keep lazy as the default recommendation. |
 | Config precedence surprises users. | Print effective model/context in startup output and detailed sources in verbose mode. |
 
@@ -720,6 +725,6 @@ Follow the PRD phases, but build vertical slices that can run end to end.
 - Prompt strings should be generated from structured data and covered by golden tests.
 - Slash commands are local control plane commands, not model messages.
 - `refresh_manifest` replaces prompt state instead of appending history.
-- Raw transcript is short-lived; rolling summary is the durable context primitive.
+- Raw transcript is short-lived; rolling semantic memory plus bounded deterministic anchors are the durable context primitives.
 - User-facing docs must stay aligned with this architecture and the PRD, but detailed
   module internals should remain here.

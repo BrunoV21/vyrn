@@ -70,10 +70,11 @@ controls; `/help` lists the complete key map. The inspect strip presents boxed
 `help`, `stats`, `context`, `scratchpad`, `manifest`, `skills`, and `refresh`
 buttons. Clicking the selected inspector button again collapses its panel.
 With inspect visible, each interaction also exposes its own scratchpad control;
-turns without tool-driven compaction explicitly show `none`. Generated labels
-use the scratchpad response's output-token count (and identify an estimated
-fallback when provider usage is missing). Tool rows start collapsed; click a row
-to reveal or hide its input and output preview independently.
+turns without tool-driven compaction explicitly show `none`. Labels show the
+estimated token footprint of the deterministic checkpoint. Tool rows start collapsed; click a row
+to reveal or hide its input and output preview independently whenever trace is
+visible. Expanded tool details include the deterministic scratchpad attached
+to that tool batch; opening it also opens inspect.
 These controls remain clickable while the model is thinking or streaming. View
 controls update immediately; model switches and manifest refreshes are applied
 after the active turn, while `clear` cancels that turn before clearing the
@@ -210,7 +211,8 @@ use the displayed paths or drag a trace JSON file into the page.
 
 When a trace path is passed, vyrn embeds that JSON into the generated page and
 renders it immediately. The viewer places human/agent interactions in one lane
-and harness internals such as summary refreshes and turn scratchpads in another.
+and model-backed harness internals such as summary refreshes in another.
+Deterministic scratchpads are visible in the agent requests that consume them.
 Each call shows provider usage, separately labeled estimates, context available,
 and per-message estimates. Per-message values are estimates because providers
 only return aggregate request usage.

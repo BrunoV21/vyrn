@@ -300,7 +300,9 @@ vyrn does not send the full conversation history on each request. Instead, it ma
 5. Agent responds, executes tools, completes task
 ```
 
-Two LLM calls per request is intentional and acceptable — vyrn targets local models where inference is fast and there is no per-token billing.
+One rolling-summary call before each non-initial request is intentional. Tool-turn
+scratchpads are deterministic bounded checkpoints, so tool use does not add a
+second hidden compression call after every batch.
 
 ### 10.2 What the Summary Preserves
 
@@ -310,11 +312,12 @@ The model decides what to keep. General heuristics it is instructed to follow:
 - Drop: raw tool call results once acted on, intermediate reasoning, repeated context
 - Always keep: the user's original high-level goal for the session
 
-The exact first user goal and a bounded exact copy of the most recent exchange
-are deterministic memory anchors rather than model-authored summaries. The
-recent exchange includes the final turn scratchpad so facts learned through
-tools remain available to the next user turn. Empty summary output never clears
-an existing summary.
+The first meaningful user goal (greetings are ignored), a bounded exact copy of
+the most recent exchange, and a bounded authoritative tool checkpoint are
+deterministic memory anchors rather than model-authored summaries. Tool
+checkpoints retain exact call arguments plus bounded head-and-tail result
+excerpts. Empty or output-limit-truncated summary responses fall back to an
+exact bounded exchange checkpoint instead of replacing valid memory.
 
 ### 10.3 Pruning Aggressiveness
 
@@ -362,9 +365,10 @@ Up/Down selects a command and `Tab` accepts it.
 When the model calls `ask_user`, vyrn renders a clarification prompt with
 selectable options and a freeform reply path, then continues the same turn.
 With inspect visible, every interaction exposes its retained scratchpad (or an
-explicit `none`) and the output-token count returned by each scratchpad
-generation response. Tool rows remain collapsed until the user clicks one to
-inspect its input and output preview.
+explicit `none`) and its estimated retained-token footprint. Tool rows remain collapsed until the user clicks one to
+inspect its input, output preview, and attached tool-batch scratchpad. Tool-row
+disclosure remains available whenever trace is visible; opening its scratchpad
+activates inspect.
 
 ```
 vyrn
@@ -384,9 +388,9 @@ vyrn: I'll start by reading the current auth implementation...
 ### 11.2 Streaming
 
 LLM responses stream token by token directly to the terminal as they are returned from the API. Tool calls and results are displayed inline as they execute.
-Every non-streaming model wait, including summary integration and turn-scratchpad
-updates, shows a violet animated status marker so the terminal never appears
-stalled.
+Every non-streaming model wait, including summary integration, shows a violet
+animated status marker so the terminal never appears stalled. Deterministic
+turn-checkpoint updates do not wait on the model.
 
 ### 11.3 Token Stats Display
 
@@ -461,13 +465,14 @@ Debug mode keeps the normal UI compact while making LLM traffic auditable:
   estimate because providers report aggregate call usage, not per-message
   counts. API keys and authorization headers are not written.
 - Schema-v2 calls carry `action_scope: interaction|harness`. The viewer renders
-  human/agent calls separately from rolling-summary, scratchpad, and eval-judge
-  mechanisms so scratchpad evolution and ingestion are easy to follow.
+  human/agent calls separately from rolling-summary and eval-judge mechanisms.
+  Deterministic scratchpads remain visible in the agent requests that consume
+  them and in the interactive scratchpad inspector.
 - Streaming requests ask OpenAI-compatible providers to include usage. Internal
-  rolling-summary and scratchpad completions are capped at 384 output tokens to
-  keep the harness responsive.
+  rolling-summary completions are capped at 384 output tokens. A length finish
+  reason or provider count at that cap activates deterministic fallback memory.
 - Parallel tool calls from one assistant response share one scratchpad update;
-  internal compaction work scales with tool batches rather than individual tools.
+  deterministic compaction work scales with tool batches rather than individual tools.
 
 ### 11.8 Agent Behavioral Tests
 
@@ -528,9 +533,9 @@ Tool calling uses the standard OpenAI `tools` / `tool_choice` format.
 ## 14. Key Design Principles
 
 1. **Token budget is a first-class constraint.** Every design decision — tool descriptions, system prompt, history management — is evaluated through the lens of token cost.
-2. **The model drives compression; deterministic anchors prevent amnesia.** vyrn asks the model what to keep while retaining the exact session goal, recent exchange, and tool-turn scratchpad anchors.
+2. **The model compresses semantics; deterministic anchors prevent amnesia.** vyrn asks the model what remains relevant across turns while exact bounded goal, recent-exchange, and tool-checkpoint anchors preserve paths and outcomes.
 3. **Raw over structured.** The `batch` tool is a raw shell passthrough. Simplicity beats safety theatre.
-4. **Two calls per request is fine.** Local models are fast and free. More calls for better quality is a good tradeoff.
+4. **Hidden calls must earn their cost.** A rolling-summary call can replace large history; deterministic tool checkpoints avoid repeated inference after each tool batch.
 5. **Open standards first.** Agent Skills, `.mcp.json`, OpenAI API — no proprietary lock-in anywhere.
 6. **Token savings is a product feature, not a metric.** It should be visible, satisfying, and shareable.
 

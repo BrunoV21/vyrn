@@ -21,8 +21,8 @@ An opt-in `vyrn tui` command previews a full-screen layout with persistent
 context telemetry, inspector controls, transcript, composer, and session stats.
 Its header, inspect strip, command palette, and model picker support mouse
 clicks. Inspect mode adds per-interaction scratchpad controls and independently
-expandable tool rows, which stay collapsed by default. The native-scrollback
-interface remains the default.
+expandable trace tool rows stay collapsed by default and expose their attached
+scratchpad when opened. The native-scrollback interface remains the default.
 
 ```text
 ┌──────────────┐   compact prompt    ┌──────────────┐
@@ -47,7 +47,7 @@ interface remains the default.
 - **Terminal UI:** real terminal sessions use a styled native-scrollback chat surface instead of a bare line prompt.
 - **Human clarification:** the model can call `ask_user` mid-turn to choose from options or accept a freeform reply.
 - **Rolling summaries:** conversation history is compressed into a living summary instead of resent wholesale on every turn.
-- **Visible savings:** each completed request reports tokens spent, history saved, session history saved, and current context footprint.
+- **Visible savings:** each completed request reports spent/history/context totals; `/stats` separates memory-call overhead and net savings from raw-history reduction.
 - **Open standards:** skills follow Agent Skills protocol, and MCP config follows `.mcp.json` conventions.
 
 ## Installation

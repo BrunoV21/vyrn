@@ -10,12 +10,14 @@ vyrn does not send full conversation history on every request. It keeps a living
 1. User sends a new request.
 2. vyrn asks the model to update the current summary from the last exchange.
 3. The updated summary replaces the old summary.
-4. vyrn sends the exact session-goal anchor, updated summary, compact exact
-   recent exchange, and new request to the model.
+4. vyrn sends the bounded meaningful-goal anchor, updated summary, authoritative
+   bounded tool memory, compact exact recent exchange, and new request to the model.
 5. The agent streams, uses tools, and completes the task.
 ```
 
-Two model calls per user request are intentional. vyrn targets local and small models where token pressure matters and additional calls can be cheaper than large prompt reuse.
+Each non-initial request adds one rolling-summary model call. Tool-turn
+checkpoints are deterministic and do not require another inference call, which
+keeps local-model latency and token use predictable.
 
 ## What summaries preserve
 
@@ -25,11 +27,17 @@ Two model calls per user request are intentional. vyrn targets local and small m
 - Important outputs that still affect the task.
 - Current constraints and open risks.
 
-The rolling summary is not the only memory source. vyrn keeps the first user
-goal verbatim, keeps a bounded verbatim anchor for the most recent exchange,
-and includes the final turn scratchpad when summarizing tool-backed work. This
-prevents a weak or empty summary response from silently erasing the previous
-conversation while retaining a small-context design.
+The rolling summary is not the only memory source. vyrn ignores greetings when
+selecting the first meaningful goal, keeps bounded verbatim anchors for that
+goal and the most recent exchange, and accumulates an authoritative bounded
+tool checkpoint. Checkpoints retain exact tool arguments and head-and-tail
+result excerpts. Empty or capped summary responses use a deterministic exchange
+fallback instead of silently erasing previous context.
+
+Within a tool chain, vyrn starts pruning at 70% of the configured context
+budget. This leaves headroom for provider-tokenizer differences and the next
+model response instead of waiting until the estimated prompt already reaches
+the hard limit.
 
 ## What summaries drop
 

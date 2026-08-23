@@ -20,6 +20,15 @@ rolling summary against sending the previous raw exchange history again. It does
 not claim every possible saving from current-turn tool result truncation,
 current-turn tool history compaction, or omitted intermediate terminal output.
 
+`/stats` reports memory-call overhead and net estimated savings separately:
+
+```text
+net_vs_raw_history = history_tokens_saved - rolling_summary_call_tokens
+```
+
+This makes short sessions, where summary overhead can exceed history reduction,
+visibly different from longer sessions where compression is net-positive.
+
 `spent` is cumulative model I/O for all model calls in a turn. A multi-tool turn
 can therefore spend far more tokens than the final `context` value, because
 `context` is only the retained prompt footprint after the turn has finished.

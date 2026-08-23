@@ -87,6 +87,9 @@ session:
 }
 ```
 
+Set optional `context_tokens` on a case to force a repeatable small-context
+budget without changing the rest of the suite. Values below 512 are rejected.
+
 The optional `steering` fixture injects a human message after a zero-based agent
 round and before proposed tools execute. It deterministically exercises the
 same next-decision semantics as interactive live steering.
@@ -96,9 +99,11 @@ same next-decision semantics as interactive live steering.
 Supported assertion types:
 
 - `assistant_contains`
+- `assistant_equals`
 - `assistant_not_contains`
 - `tool_called`
 - `tool_called_at_least`
+- `tool_called_exactly`
 - `tool_not_called`
 - `file_exists`
 - `file_not_exists`
@@ -130,9 +135,9 @@ page.
 ## Context Warnings
 
 vyrn fits chained tool-call requests before sending them. Large tool outputs are
-compacted into the turn scratchpad, and multiple tool calls from one assistant
-response are processed incrementally so one large batch does not exceed the context
-budget.
+compacted into a deterministic turn scratchpad, and multiple tool calls from one
+assistant response are processed incrementally so one large batch does not
+exceed the context budget.
 
 `batch` trims very large stdout/stderr before returning tool results. The trace keeps
 the trimmed content plus a marker showing how much output was omitted.
