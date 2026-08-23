@@ -3,6 +3,7 @@ set -u
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 invocation_dir=$(pwd)
+env_file="$repo_dir/.env"
 suite_path="$repo_dir/agent-behavior/agent-behavior.json"
 models_file="$repo_dir/agent-behavior/models.toml"
 models_list="$repo_dir/agent-behavior/models.list"
@@ -10,6 +11,13 @@ output_root="$repo_dir/.vyrn/behavior-runs/$(date -u +%Y%m%dT%H%M%SZ)"
 selected_models=""
 selected_cases=""
 keep_workdirs=0
+
+if [ -f "$env_file" ]; then
+  set -a
+  # Repository-local test credentials; .env is excluded from Git.
+  . "$env_file"
+  set +a
+fi
 
 usage() {
   printf '%s\n' \

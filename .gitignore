@@ -6,6 +6,7 @@ docs/official/.vitepress/dist/
 
 .DS_Store
 *.log
+.env
 
 .ferrisgrid/
 .vyrn/config.toml
