@@ -1,13 +1,12 @@
 use crate::agent::prompt::build_agent_prompt;
 use crate::agent::tokens::{
     TokenBreakdown, TokenCount, TokenLedger, TurnUsage, estimate_assistant_output_tokens,
-    estimate_chat_request_breakdown, estimate_messages_breakdown, estimate_unpruned_request_tokens,
+    estimate_chat_request_breakdown, estimate_unpruned_request_tokens,
 };
 use crate::agent::transcript::{Exchange, truncate};
 use crate::agent::turn::{
-    TurnScratchpad, apply_live_steering_to_tool_batch,
-    build_fitted_turn_scratchpad_update_messages, build_turn_messages, live_steering_message,
-    prepare_next_turn_context, turn_scratchpad_update_source,
+    TurnScratchpad, apply_live_steering_to_tool_batch, build_turn_messages, live_steering_message,
+    prepare_next_turn_context, update_turn_scratchpad,
 };
 use crate::app::App;
 use crate::config::{ConfigSources, ModelProfile, ModelRegistry, ModelState};
@@ -157,11 +156,6 @@ pub struct Repl {
     prompt_history: Vec<String>,
     plain_lines: Option<Lines<BufReader<tokio::io::Stdin>>>,
     input_pause: Arc<AtomicBool>,
-}
-
-struct ScratchpadUpdate {
-    scratchpad: TurnScratchpad,
-    output_tokens: TokenCount,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1129,73 +1123,15 @@ impl Repl {
                     }
                 }
             }
-            let last_tool_index = tool_count.saturating_sub(1);
             emit(TuiUpdate::ScratchpadStart);
-            let scratchpad_or_input = tokio::select! {
-                biased;
-                Some(input) = active_input.recv() => Err(input),
-                result = self.update_turn_scratchpad(
-                    &scratchpad,
-                    &current_tool_batch,
-                    &assistant_tool_message,
-                    &mut usage,
-                    round,
-                    last_tool_index,
-                ) => Ok(result),
-            };
-            scratchpad = match scratchpad_or_input {
-                Ok(Ok(update)) => {
-                    emit(TuiUpdate::ScratchpadDone {
-                        summary: Some(update.scratchpad.summary.clone()),
-                        output_tokens: Some(update.output_tokens),
-                    });
-                    self.last_scratchpad_tokens = update.output_tokens;
-                    update.scratchpad
-                }
-                Ok(Err(error)) => {
-                    emit(TuiUpdate::ScratchpadDone {
-                        summary: None,
-                        output_tokens: None,
-                    });
-                    return Err(error);
-                }
-                Err(ActiveTurnInput::Cancel) => {
-                    emit(TuiUpdate::ScratchpadDone {
-                        summary: None,
-                        output_tokens: None,
-                    });
-                    return Err(LlmError::Canceled);
-                }
-                Err(ActiveTurnInput::Steering(text)) => {
-                    emit(TuiUpdate::ScratchpadDone {
-                        summary: None,
-                        output_tokens: None,
-                    });
-                    self.debug_log(format!("live_steering_scratchpad_interrupt round={round}"));
-                    emit(TuiUpdate::Steering(text.clone()));
-                    current_tool_batch.push(live_steering_message(&text));
-                    steering_inputs.push(text);
-                    let next_context = prepare_next_turn_context(
-                        &base_messages,
-                        &scratchpad,
-                        &current_tool_batch,
-                        &tool_schemas,
-                        self.app.config.context.max_tokens,
-                    )?;
-                    scratchpad = next_context.scratchpad;
-                    current_tool_batch = next_context.tool_batch;
-                    continue 'agent_rounds;
-                }
-                Err(ActiveTurnInput::Clarification(_)) => {
-                    emit(TuiUpdate::ScratchpadDone {
-                        summary: None,
-                        output_tokens: None,
-                    });
-                    return Err(LlmError::Input(
-                        "received a clarification response without an active question".to_string(),
-                    ));
-                }
-            };
+            scratchpad = update_turn_scratchpad(&scratchpad, &current_tool_batch);
+            self.last_scratchpad_tokens = TokenCount::estimate(
+                crate::agent::tokens::estimate_text_tokens(&scratchpad.summary),
+            );
+            emit(TuiUpdate::ScratchpadDone {
+                summary: Some(scratchpad.summary.clone()),
+                output_tokens: Some(self.last_scratchpad_tokens),
+            });
             self.last_scratchpad = scratchpad.clone();
             self.debug_log(format!(
                 "turn_scratchpad_update round={} tools={} tokens={} token_source={} chars={}",
@@ -1272,106 +1208,6 @@ impl Repl {
         }
 
         Ok(())
-    }
-
-    async fn update_turn_scratchpad(
-        &mut self,
-        scratchpad: &TurnScratchpad,
-        consumed_tool_batch: &[ChatMessage],
-        assistant_response: &ChatMessage,
-        usage: &mut TurnUsage,
-        round: usize,
-        tool_index: usize,
-    ) -> Result<ScratchpadUpdate, LlmError> {
-        let max_tokens = self.app.config.context.max_tokens;
-        let source = turn_scratchpad_update_source(consumed_tool_batch, assistant_response);
-        let messages =
-            build_fitted_turn_scratchpad_update_messages(&scratchpad.summary, &source, max_tokens);
-        let estimated_input_tokens = estimate_messages_breakdown(&messages).total();
-        self.debug_log(format!(
-            "turn_scratchpad_request input_estimate={} source_chars={} previous_chars={}",
-            estimated_input_tokens,
-            messages
-                .get(1)
-                .and_then(ChatMessage::content_text)
-                .map(|content| content.chars().count())
-                .unwrap_or_default(),
-            scratchpad.summary.chars().count()
-        ));
-        let request = ChatCompletionRequest {
-            model: String::new(),
-            messages,
-            tools: Vec::new(),
-            tool_choice: None,
-            stream: false,
-            stream_options: None,
-            max_tokens: Some(384),
-        };
-        let pending_trace = self.app.trace.as_ref().map(|trace| {
-            trace.begin_call(
-                &self.app.client,
-                &request,
-                false,
-                TraceMetadata {
-                    action_type: "turn_scratchpad",
-                    label: Some("turn-scratchpad".to_string()),
-                    turn_index: Some(self.app.stats.turns.len()),
-                    round_index: Some(round),
-                    tool_index: Some(tool_index),
-                    estimated_input_tokens: Some(estimated_input_tokens),
-                    context_limit: Some(max_tokens),
-                    ..TraceMetadata::default()
-                },
-            )
-        });
-        let response_result = self.app.client.complete_chat(request).await;
-        if let (Some(trace), Some(pending_trace)) = (self.app.trace.as_mut(), pending_trace) {
-            let _ = trace.finish_call(pending_trace, &response_result);
-        }
-        let response = response_result?;
-        let summary = response
-            .choices
-            .first()
-            .and_then(|choice| choice.message.content_text().map(str::trim))
-            .filter(|summary| !summary.is_empty())
-            .ok_or_else(|| {
-                LlmError::Input("turn scratchpad update returned an empty summary".to_string())
-            })?
-            .to_string();
-        let provider_usage = response.usage;
-        let input = if provider_usage.is_some_and(|usage| usage.prompt_tokens > 0) {
-            TokenCount::provider(provider_usage.unwrap_or_default().prompt_tokens)
-        } else {
-            TokenCount::estimate(estimated_input_tokens)
-        };
-        let output = if provider_usage.is_some_and(|usage| usage.completion_tokens > 0) {
-            TokenCount::provider(provider_usage.unwrap_or_default().completion_tokens)
-        } else {
-            TokenCount::estimate(crate::agent::tokens::estimate_text_tokens(&summary))
-        };
-        usage.add_model_call_with_breakdown(
-            "turn-scratchpad",
-            input,
-            output,
-            input.tokens + output.tokens,
-            TokenBreakdown {
-                summary_inputs: input.tokens,
-                summary_outputs: output.tokens,
-                ..TokenBreakdown::default()
-            },
-        );
-        self.debug_log(format!(
-            "turn_scratchpad_response input_tokens={} input_source={} output_tokens={} output_source={} summary_tokens={}",
-            input.tokens,
-            input.source.label(),
-            output.tokens,
-            output.source.label(),
-            crate::agent::tokens::estimate_text_tokens(&summary)
-        ));
-        Ok(ScratchpadUpdate {
-            scratchpad: TurnScratchpad { summary },
-            output_tokens: output,
-        })
     }
 
     fn debug_log(&self, event: impl AsRef<str>) {
@@ -1603,12 +1439,14 @@ impl Repl {
     fn full_stats_text(&self) -> String {
         let current_context = self.current_context_tokens();
         let mut text = format!(
-            "session spent: {} (provider: {}, estimated fallback: {}) | session raw-history would be (estimated): {} | session history saved (estimated): {} | context (estimated): {}/{} | available: {}",
+            "session spent: {} (provider: {}, estimated fallback: {}) | session raw-history would be (estimated): {} | history reduction (estimated): {} | memory overhead: {} | net vs raw history (estimated): {} | context (estimated): {}/{} | available: {}",
             self.app.stats.session_sent,
             self.app.stats.session_provider_tokens,
             self.app.stats.session_estimated_tokens,
             self.app.stats.session_would_be,
             self.app.stats.session_saved,
+            self.app.stats.memory_overhead_tokens(),
+            self.app.stats.net_history_savings(),
             current_context,
             self.app.config.context.max_tokens,
             self.app
@@ -1708,11 +1546,13 @@ impl Repl {
             .map(crate::agent::tokens::estimate_text_tokens)
             .unwrap_or_default();
         format!(
-            "context (estimated): {used}/{limit} ({percent}%) | available: {available}\nrolling summary (estimated): {rolling_summary} | raw history (estimated): {}\nprovider-reported session tokens: {} | estimated fallback: {} | history saved (estimated): {}",
+            "context (estimated): {used}/{limit} ({percent}%) | available: {available}\nrolling summary (estimated): {rolling_summary} | raw history (estimated): {}\nprovider-reported session tokens: {} | estimated fallback: {} | history reduction: {} | memory overhead: {} | net vs raw history: {}",
             self.app.context.raw_history_tokens(),
             self.app.stats.session_provider_tokens,
             self.app.stats.session_estimated_tokens,
             self.app.stats.session_saved,
+            self.app.stats.memory_overhead_tokens(),
+            self.app.stats.net_history_savings(),
         )
     }
 
@@ -1721,9 +1561,8 @@ impl Repl {
             "turn scratchpad: none (no tool-driven context has been compacted yet)".to_string()
         } else {
             format!(
-                "turn scratchpad ({} {} tokens from generation response):\n{}",
+                "turn scratchpad ({} estimated tokens, deterministic checkpoint):\n{}",
                 self.last_scratchpad_tokens.tokens,
-                self.last_scratchpad_tokens.source.label(),
                 self.last_scratchpad.summary.trim()
             )
         }
@@ -2746,6 +2585,20 @@ fn print_stats_panel(
         (
             crate::tui::render::format_number(ledger.session_saved),
             if ledger.session_saved >= 0 {
+                VY_SUCCESS
+            } else {
+                VY_RED
+            },
+        ),
+        (String::from("  memory overhead "), VY_TEXT_MUTED),
+        (
+            crate::tui::render::format_number(ledger.memory_overhead_tokens() as isize),
+            VY_TEXT_DIM,
+        ),
+        (String::from("  net vs raw "), VY_TEXT_MUTED),
+        (
+            crate::tui::render::format_number(ledger.net_history_savings()),
+            if ledger.net_history_savings() >= 0 {
                 VY_SUCCESS
             } else {
                 VY_RED

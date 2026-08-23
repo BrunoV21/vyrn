@@ -460,7 +460,7 @@ fn fullscreen_tui_answers_ask_user_in_a_modal_and_continues_the_turn() {
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let server_bodies = Arc::clone(&bodies);
     let server = thread::spawn(move || {
-        for index in 0..3 {
+        for index in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             let body = read_http_body(&mut stream);
             server_bodies.lock().unwrap().push(body);
@@ -468,10 +468,6 @@ fn fullscreen_tui_answers_ask_user_in_a_modal_and_continues_the_turn() {
                 0 => write_sse(
                     &mut stream,
                     r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_ask","type":"function","function":{"name":"ask_user","arguments":"{\"questions\":[{\"id\":\"scope\",\"header\":\"Scope\",\"question\":\"Which approach should I use?\",\"options\":[{\"label\":\"Core tool\",\"description\":\"Always available\"},{\"label\":\"Slash command\"}]}]}"}}]}}]}"#,
-                ),
-                1 => write_json(
-                    &mut stream,
-                    r#"{"choices":[{"message":{"role":"assistant","content":"- User selected Core tool."}}],"usage":{"prompt_tokens":60,"completion_tokens":10,"total_tokens":70}}"#,
                 ),
                 _ => write_sse(
                     &mut stream,
@@ -552,8 +548,8 @@ api_key = ""
     server.join().unwrap();
 
     let bodies = bodies.lock().unwrap();
-    assert!(bodies[2].contains("Core tool"), "{}", bodies[2]);
-    assert!(bodies[2].contains("call_ask"), "{}", bodies[2]);
+    assert!(bodies[1].contains("Core tool"), "{}", bodies[1]);
+    assert!(bodies[1].contains("call_ask"), "{}", bodies[1]);
 }
 
 #[test]
@@ -561,17 +557,10 @@ fn repl_runs_against_openai_compatible_streaming_server() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
-        for _ in 0..3 {
+        for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             let body = read_http_body(&mut stream);
-            if body.contains("Current scratchpad")
-                || body.contains("New consumed tool batch and assistant response")
-            {
-                write_json(
-                    &mut stream,
-                    r#"{"choices":[{"message":{"role":"assistant","content":"- read_file saw fixture.txt: hello from e2e."}}],"usage":{"prompt_tokens":80,"completion_tokens":16,"total_tokens":96}}"#,
-                );
-            } else if body.contains("[turn scratchpad]") {
+            if body.contains("[turn scratchpad]") {
                 write_sse(
                     &mut stream,
                     r#"data: {"choices":[{"delta":{"content":"I read fixture.txt: hello from e2e."}}]}"#,
@@ -630,21 +619,21 @@ api_key = ""
     assert!(stdout.contains("[updating turn memory...]"), "{stdout}");
     assert!(stdout.contains("I read fixture.txt: hello from e2e."));
     assert!(
-        stdout.contains("turn scratchpad (16 provider tokens from generation response)"),
+        stdout.contains("estimated tokens, deterministic checkpoint"),
         "{stdout}"
     );
-    assert!(stdout.contains("read_file saw fixture.txt"), "{stdout}");
+    assert!(stdout.contains("hello from e2e"), "{stdout}");
     assert!(stdout.contains("turn spent:"));
 }
 
 #[test]
-fn parallel_tool_calls_share_one_bounded_scratchpad_update() {
+fn parallel_tool_calls_share_one_bounded_deterministic_checkpoint() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let server_bodies = Arc::clone(&bodies);
     let server = thread::spawn(move || {
-        for index in 0..3 {
+        for index in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             let body = read_http_body(&mut stream);
             server_bodies.lock().unwrap().push(body);
@@ -652,10 +641,6 @@ fn parallel_tool_calls_share_one_bounded_scratchpad_update() {
                 0 => write_sse(
                     &mut stream,
                     r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}},{"index":1,"id":"call_b","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"b.txt\"}"}}]}}]}"#,
-                ),
-                1 => write_json(
-                    &mut stream,
-                    r#"{"choices":[{"message":{"role":"assistant","content":"- Read a.txt and b.txt in one parallel batch."}}],"usage":{"prompt_tokens":70,"completion_tokens":12,"total_tokens":82}}"#,
                 ),
                 _ => write_sse(
                     &mut stream,
@@ -704,23 +689,19 @@ api_key = ""
         String::from_utf8_lossy(&output.stderr)
     );
     let requests = bodies.lock().unwrap();
-    assert_eq!(requests.len(), 3, "{requests:#?}");
+    assert_eq!(requests.len(), 2, "{requests:#?}");
     assert_eq!(
         requests
             .iter()
             .filter(|request| request.contains("Current scratchpad"))
             .count(),
-        1,
+        0,
         "{requests:#?}"
     );
     assert!(requests[1].contains("alpha"), "{}", requests[1]);
     assert!(requests[1].contains("beta"), "{}", requests[1]);
-    assert!(
-        requests[1].contains(r#""max_tokens":384"#),
-        "{}",
-        requests[1]
-    );
-    assert_eq!(requests[2].matches(r#""role":"tool""#).count(), 2);
+    assert!(requests[1].contains("[turn scratchpad]"), "{}", requests[1]);
+    assert_eq!(requests[1].matches(r#""role":"tool""#).count(), 2);
 }
 
 #[test]
@@ -730,7 +711,7 @@ fn repl_plain_mode_answers_ask_user_tool_and_continues_turn() {
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let server_bodies = Arc::clone(&bodies);
     let server = thread::spawn(move || {
-        for index in 0..3 {
+        for index in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             let body = read_http_body(&mut stream);
             server_bodies.lock().unwrap().push(body.clone());
@@ -738,10 +719,6 @@ fn repl_plain_mode_answers_ask_user_tool_and_continues_turn() {
                 0 => write_sse(
                     &mut stream,
                     r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_ask","type":"function","function":{"name":"ask_user","arguments":"{\"questions\":[{\"id\":\"scope\",\"header\":\"Scope\",\"question\":\"Which approach should I use?\",\"options\":[{\"label\":\"Core tool\",\"description\":\"Always available\"},{\"label\":\"Slash command\"}]}]}"}}]}}]}"#,
-                ),
-                1 => write_json(
-                    &mut stream,
-                    r#"{"choices":[{"message":{"role":"assistant","content":"- User chose Core tool for scope clarification."}}],"usage":{"prompt_tokens":90,"completion_tokens":16,"total_tokens":106}}"#,
                 ),
                 _ => write_sse(
                     &mut stream,
@@ -804,11 +781,11 @@ api_key = ""
     let bodies = bodies.lock().unwrap();
     assert!(bodies[0].contains("\"name\":\"ask_user\""), "{}", bodies[0]);
     assert!(
-        bodies[2].contains("\"tool_call_id\":\"call_ask\""),
+        bodies[1].contains("\"tool_call_id\":\"call_ask\""),
         "{}",
-        bodies[2]
+        bodies[1]
     );
-    assert!(bodies[2].contains("Core tool"), "{}", bodies[2]);
+    assert!(bodies[1].contains("Core tool"), "{}", bodies[1]);
 }
 
 #[test]
@@ -889,6 +866,8 @@ api_key = ""
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("session spent"), "{stdout}");
+    assert!(stdout.contains("memory overhead"), "{stdout}");
+    assert!(stdout.contains("net vs raw history"), "{stdout}");
     assert!(stdout.contains("contributors:"), "{stdout}");
     assert!(stdout.contains("summary input:"), "{stdout}");
     assert!(stdout.contains("summary output:"), "{stdout}");
@@ -1061,15 +1040,6 @@ fn repl_compacts_tool_history_and_continues_past_eight_rounds() {
             let (mut stream, _) = listener.accept().unwrap();
             let body = read_http_body(&mut stream);
             server_bodies.lock().unwrap().push(body.clone());
-            if body.contains("Current scratchpad")
-                || body.contains("New consumed tool batch and assistant response")
-            {
-                write_json(
-                    &mut stream,
-                    r#"{"choices":[{"message":{"role":"assistant","content":"- Summarized consumed fixture read batch and retained that fixture.txt returned repeated x characters."}}],"usage":{"prompt_tokens":120,"completion_tokens":24,"total_tokens":144}}"#,
-                );
-                continue;
-            }
             if agent_index < 10 {
                 write_sse(
                     &mut stream,
@@ -1155,7 +1125,7 @@ api_key = ""
     assert!(
         requests
             .iter()
-            .any(|request| request.contains("New consumed tool batch and assistant response")),
+            .all(|request| !request.contains("New consumed tool batch and assistant response")),
         "{requests:#?}"
     );
     for request in agent_requests.into_iter().skip(1) {
@@ -1234,18 +1204,11 @@ fn repl_sends_read_image_tool_results_as_vision_content() {
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let server_bodies = Arc::clone(&bodies);
     let server = thread::spawn(move || {
-        for index in 0..3 {
+        for index in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             let body = read_http_body(&mut stream);
             server_bodies.lock().unwrap().push(body.clone());
-            if body.contains("Current scratchpad")
-                || body.contains("New consumed tool batch and assistant response")
-            {
-                write_json(
-                    &mut stream,
-                    r#"{"choices":[{"message":{"role":"assistant","content":"- read_image attached sample.png for inspection."}}],"usage":{"prompt_tokens":90,"completion_tokens":18,"total_tokens":108}}"#,
-                );
-            } else if index == 0 {
+            if index == 0 {
                 write_sse(
                     &mut stream,
                     r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_image","type":"function","function":{"name":"read_image","arguments":"{\"paths\":[\"sample.png\"]}"}}]}}]}"#,
@@ -1297,14 +1260,14 @@ api_key = ""
         String::from_utf8_lossy(&output.stderr)
     );
     let requests = bodies.lock().unwrap();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 2);
     assert!(
         requests[0].contains(r#""name":"read_image""#),
         "{}",
         requests[0]
     );
     assert!(
-        !requests[1].contains("data:image/png;base64"),
+        requests[1].contains("data:image/png;base64"),
         "{}",
         requests[1]
     );
@@ -1313,7 +1276,22 @@ api_key = ""
         "{}",
         requests[1]
     );
-    assert!(requests[2].contains("[turn scratchpad]"), "{}", requests[2]);
+    assert!(requests[1].contains("[turn scratchpad]"), "{}", requests[1]);
+    let request: serde_json::Value = serde_json::from_str(&requests[1]).unwrap();
+    let checkpoint = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|message| {
+            message["content"]
+                .as_str()
+                .filter(|content| content.starts_with("[turn scratchpad]"))
+        })
+        .unwrap();
+    assert!(
+        !checkpoint.contains("data:image/png;base64"),
+        "{checkpoint}"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("The image tool result was visible."));
 }

@@ -613,6 +613,7 @@ body.hideInspect .inspector{
             <div class="stdout"><strong>stdout:</strong> Sun Aug 23 17:40:47 WEST 2026</div>
             <div class="toolActions">
               <button class="mini" onclick="copyText('date')">copy command</button>
+              <button class="mini" onclick="openScratchpad(1)">scratchpad · 18t</button>
               <button class="mini" onclick="notify('full raw output would open here')">raw output</button>
             </div>
           </div>
@@ -648,6 +649,7 @@ body.hideInspect .inspector{
             <div class="stdout"><strong>locale:</strong> en_PT<br><strong>timezone:</strong> /var/db/timezone/zoneinfo/Europe/Lisbon</div>
             <div class="toolActions">
               <button class="mini" onclick="copyText('defaults read /Library/Preferences/.GlobalPreferences AppleLocale')">copy command</button>
+              <button class="mini" onclick="openScratchpad(2)">scratchpad · 41t</button>
               <button class="mini" onclick="notify('full raw output would open here')">raw output</button>
             </div>
           </div>
@@ -683,6 +685,7 @@ body.hideInspect .inspector{
             <div class="stdout"><strong>city:</strong> Coruche<br><strong>region:</strong> Santarém<br><strong>country:</strong> PT<br><strong>postal:</strong> 2100-000</div>
             <div class="toolActions">
               <button class="mini" onclick="copyText('curl -s ipinfo.io')">copy command</button>
+              <button class="mini" onclick="openScratchpad(3)">scratchpad · 83t</button>
               <button class="mini" onclick="notify('full raw output would open here')">raw output</button>
             </div>
           </div>
@@ -987,7 +990,7 @@ function openScratchpad(turnId){
 }
 document.getElementById('inspectorClose').onclick=()=>inspector.classList.remove('open');
 
-function toolMarkup(kind, cmd, stdout, duration='0.44s', extra={}){
+function toolMarkup(kind, cmd, stdout, duration='0.44s', extra={}, turnId=3){
   const name=kind==='net'?'tool.net':'tool.shell';
   const cwd=extra.cwd||'~/vyrn';
   return `
@@ -1010,6 +1013,7 @@ function toolMarkup(kind, cmd, stdout, duration='0.44s', extra={}){
       <div class="stdout">${stdout}</div>
       <div class="toolActions">
         <button class="mini" onclick="copyText(${JSON.stringify(cmd)})">copy command</button>
+        <button class="mini" onclick="openScratchpad(${turnId})">scratchpad · ${scratchpads[turnId]?.tokens ?? 0}t</button>
         <button class="mini" onclick="notify('raw detail view simulated')">raw detail</button>
       </div>
     </div>
@@ -1167,7 +1171,7 @@ retained:
     setTimeout(()=>{
       const duration=((performance.now()-start)/1000).toFixed(2)+'s';
       finish(resp,
-        toolMarkup(kind,cmd,stdout,duration,meta)+
+        toolMarkup(kind,cmd,stdout,duration,meta,turnId)+
         `<div class="answer">${answer}</div>`+
         scratchpadMarkup(turnId)
       );

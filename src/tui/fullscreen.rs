@@ -386,7 +386,8 @@ fn activate_click_target(
         | UiClickTarget::ToggleInspect
         | UiClickTarget::Inspector(_)
         | UiClickTarget::TurnScratchpad(_)
-        | UiClickTarget::ToolDetails { .. } => {
+        | UiClickTarget::ToolDetails { .. }
+        | UiClickTarget::ToolScratchpad { .. } => {
             unreachable!("local click target already handled")
         }
     }
@@ -415,6 +416,10 @@ fn activate_local_click_target(target: UiClickTarget, state: &mut UiState) -> bo
             turn_index,
             event_index,
         } => state.toggle_tool_details(turn_index, event_index),
+        UiClickTarget::ToolScratchpad {
+            turn_index,
+            event_index,
+        } => state.open_tool_scratchpad(turn_index, event_index),
         UiClickTarget::Clear | UiClickTarget::Refresh => return false,
     }
     true
@@ -731,7 +736,8 @@ fn handle_active_mouse_in_area(
             | UiClickTarget::ToggleInspect
             | UiClickTarget::Inspector(_)
             | UiClickTarget::TurnScratchpad(_)
-            | UiClickTarget::ToolDetails { .. } => {
+            | UiClickTarget::ToolDetails { .. }
+            | UiClickTarget::ToolScratchpad { .. } => {
                 unreachable!("local click target already handled")
             }
         }
@@ -911,6 +917,10 @@ enum UiClickTarget {
         turn_index: usize,
         event_index: usize,
     },
+    ToolScratchpad {
+        turn_index: usize,
+        event_index: usize,
+    },
     Refresh,
 }
 
@@ -1037,6 +1047,7 @@ struct UiState {
     inspect_visible: bool,
     inspector: Option<InspectorKey>,
     inspected_turn: Option<usize>,
+    inspected_tool: Option<(usize, usize)>,
     inspector_body: String,
     trace_visible: bool,
     model_picker: Option<ModelPicker>,
@@ -1074,6 +1085,7 @@ impl UiState {
             inspect_visible: true,
             inspector: Some(InspectorKey::Scratchpad),
             inspected_turn: None,
+            inspected_tool: None,
             inspector_body,
             trace_visible: true,
             model_picker: None,
@@ -1199,6 +1211,7 @@ impl UiState {
                     started: Instant::now(),
                     elapsed: Duration::ZERO,
                     expanded: false,
+                    scratchpad: None,
                 }));
             }
             TuiUpdate::ToolInputStart => {
@@ -1213,8 +1226,13 @@ impl UiState {
                 finish_tool(turn, &name, error, ToolState::Failure);
             }
             TuiUpdate::ScratchpadStart => {
-                self.activity = Some("compacting turn memory".to_string());
-                push_trace(turn, "memory", "compacting tool context", TraceState::Live);
+                self.activity = Some("checkpointing turn memory".to_string());
+                push_trace(
+                    turn,
+                    "memory",
+                    "checkpointing tool context",
+                    TraceState::Live,
+                );
             }
             TuiUpdate::ScratchpadDone {
                 summary,
@@ -1222,7 +1240,15 @@ impl UiState {
             } => {
                 finish_last_trace(turn, "memory");
                 if let (Some(summary), Some(tokens)) = (summary, output_tokens) {
-                    turn.scratchpad = Some(ScratchpadView { summary, tokens });
+                    let scratchpad = ScratchpadView { summary, tokens };
+                    for event in &mut turn.events {
+                        if let TurnEvent::Tool(tool) = event
+                            && tool.scratchpad.is_none()
+                        {
+                            tool.scratchpad = Some(scratchpad.clone());
+                        }
+                    }
+                    turn.scratchpad = Some(scratchpad);
                     scratchpad_changed = true;
                 }
             }
@@ -1251,6 +1277,7 @@ impl UiState {
         self.last_latency = Duration::ZERO;
         self.inspector = None;
         self.inspected_turn = None;
+        self.inspected_tool = None;
         self.model_picker = None;
         self.clarification = None;
         self.status = "session cleared".to_string();
@@ -1262,6 +1289,7 @@ impl UiState {
         self.inspect_visible = true;
         self.inspector = Some(key);
         self.inspected_turn = None;
+        self.inspected_tool = None;
         self.refresh_inspector_body();
     }
 
@@ -1272,8 +1300,26 @@ impl UiState {
         self.inspect_visible = true;
         self.inspector = Some(InspectorKey::Scratchpad);
         self.inspected_turn = Some(turn_index);
+        self.inspected_tool = None;
         self.refresh_inspector_body();
         self.status = format!("interaction {} scratchpad expanded", turn_index + 1);
+    }
+
+    fn open_tool_scratchpad(&mut self, turn_index: usize, event_index: usize) {
+        let Some(TurnEvent::Tool(tool)) = self
+            .turns
+            .get(turn_index)
+            .and_then(|turn| turn.events.get(event_index))
+        else {
+            return;
+        };
+        let tool_name = tool.name.clone();
+        self.inspect_visible = true;
+        self.inspector = Some(InspectorKey::Scratchpad);
+        self.inspected_turn = Some(turn_index);
+        self.inspected_tool = Some((turn_index, event_index));
+        self.refresh_inspector_body();
+        self.status = format!("tool.{tool_name} scratchpad expanded");
     }
 
     fn toggle_tool_details(&mut self, turn_index: usize, event_index: usize) {
@@ -1302,7 +1348,26 @@ impl UiState {
             return;
         };
         self.inspector_body = if key == InspectorKey::Scratchpad {
-            if let Some(index) = self.inspected_turn {
+            if let Some((turn_index, event_index)) = self.inspected_tool {
+                self.turns
+                    .get(turn_index)
+                    .and_then(|turn| turn.events.get(event_index))
+                    .and_then(|event| match event {
+                        TurnEvent::Tool(tool) => Some(tool),
+                        _ => None,
+                    })
+                    .and_then(|tool| {
+                        tool.scratchpad.as_ref().map(|scratchpad| {
+                            tool_scratchpad_text(turn_index, &tool.name, scratchpad)
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        format!(
+                            "interaction {} tool scratchpad: none (compaction has not completed)",
+                            turn_index + 1
+                        )
+                    })
+            } else if let Some(index) = self.inspected_turn {
                 self.turns
                     .get(index)
                     .and_then(|turn| turn.scratchpad.as_ref())
@@ -1488,7 +1553,7 @@ struct TurnView {
     complete: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ScratchpadView {
     summary: String,
     tokens: TokenCount,
@@ -1523,6 +1588,7 @@ struct ToolCard {
     started: Instant,
     elapsed: Duration,
     expanded: bool,
+    scratchpad: Option<ScratchpadView>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1566,16 +1632,26 @@ fn finish_tool(turn: &mut TurnView, name: &str, output: String, state: ToolState
             started: Instant::now(),
             elapsed: Duration::ZERO,
             expanded: false,
+            scratchpad: None,
         }));
     }
 }
 
 fn turn_scratchpad_text(turn_index: usize, scratchpad: &ScratchpadView) -> String {
     format!(
-        "interaction {} scratchpad ({} {} tokens from generation response):\n{}",
+        "interaction {} scratchpad ({} estimated tokens, deterministic checkpoint):\n{}",
         turn_index + 1,
         scratchpad.tokens.tokens,
-        scratchpad.tokens.source.label(),
+        scratchpad.summary.trim()
+    )
+}
+
+fn tool_scratchpad_text(turn_index: usize, tool_name: &str, scratchpad: &ScratchpadView) -> String {
+    format!(
+        "interaction {} · tool.{} scratchpad ({} estimated tokens, deterministic checkpoint):\n{}",
+        turn_index + 1,
+        tool_name,
+        scratchpad.tokens.tokens,
         scratchpad.summary.trim()
     )
 }
@@ -2290,11 +2366,26 @@ fn render_inspector(frame: &mut ratatui::Frame<'_>, area: Rect, state: &UiState)
     let Some(key) = state.inspector else {
         return;
     };
-    let label = state
-        .inspected_turn
-        .filter(|_| key == InspectorKey::Scratchpad)
-        .map(|index| format!("scratchpad · interaction {}", index + 1))
-        .unwrap_or_else(|| key.label().to_string());
+    let label = if key == InspectorKey::Scratchpad {
+        if let Some((turn_index, event_index)) = state.inspected_tool {
+            let tool_name = state
+                .turns
+                .get(turn_index)
+                .and_then(|turn| turn.events.get(event_index))
+                .and_then(|event| match event {
+                    TurnEvent::Tool(tool) => Some(tool.name.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("tool");
+            format!("scratchpad · interaction {} · {tool_name}", turn_index + 1)
+        } else if let Some(index) = state.inspected_turn {
+            format!("scratchpad · interaction {}", index + 1)
+        } else {
+            key.label().to_string()
+        }
+    } else {
+        key.label().to_string()
+    };
     let title = Line::from(vec![
         Span::styled(" inspect · ", Style::default().fg(VY_DIM)),
         Span::styled(label, Style::default().fg(VY_TEXT)),
@@ -2316,7 +2407,7 @@ fn render_transcript(frame: &mut ratatui::Frame<'_>, area: Rect, state: &mut UiS
     let rows = transcript_rows(state);
     let heights = rows
         .iter()
-        .map(|row| wrapped_line_height(&row.line, area.width))
+        .map(|row| transcript_row_height(row, area.width))
         .collect::<Vec<_>>();
     let line_count = heights
         .iter()
@@ -2356,13 +2447,22 @@ fn render_transcript(frame: &mut ratatui::Frame<'_>, area: Rect, state: &mut UiS
             u16::try_from(visible_height).unwrap_or(u16::MAX),
         );
         let background = transcript_row.line.style.bg.unwrap_or(VY_BG);
-        frame.render_widget(
-            Paragraph::new(transcript_row.line)
-                .wrap(Wrap { trim: false })
-                .scroll((u16::try_from(skipped).unwrap_or(u16::MAX), 0))
-                .style(Style::default().fg(VY_TEXT).bg(background)),
-            row,
+        frame.render_widget(Block::default().style(Style::default().bg(background)), row);
+        let indent = transcript_row.indent.min(row.width.saturating_sub(1));
+        let content_area = Rect::new(
+            row.x.saturating_add(indent),
+            row.y,
+            row.width.saturating_sub(indent),
+            row.height,
         );
+        let paragraph = Paragraph::new(transcript_row.line)
+            .scroll((u16::try_from(skipped).unwrap_or(u16::MAX), 0))
+            .style(Style::default().fg(VY_TEXT).bg(background));
+        if transcript_row.wrap {
+            frame.render_widget(paragraph.wrap(Wrap { trim: false }), content_area);
+        } else {
+            frame.render_widget(paragraph, content_area);
+        }
         if let Some(target) = transcript_row.target {
             state
                 .transcript_click_regions
@@ -2373,13 +2473,19 @@ fn render_transcript(frame: &mut ratatui::Frame<'_>, area: Rect, state: &mut UiS
     }
 }
 
-fn wrapped_line_height(line: &Line<'_>, width: u16) -> usize {
-    line.width().max(1).div_ceil(usize::from(width.max(1)))
+fn transcript_row_height(row: &TranscriptRow, width: u16) -> usize {
+    if !row.wrap {
+        return 1;
+    }
+    let content_width = width.saturating_sub(row.indent).max(1);
+    row.line.width().max(1).div_ceil(usize::from(content_width))
 }
 
 struct TranscriptRow {
     line: Line<'static>,
     target: Option<UiClickTarget>,
+    indent: u16,
+    wrap: bool,
 }
 
 impl TranscriptRow {
@@ -2387,6 +2493,17 @@ impl TranscriptRow {
         Self {
             line: line.into(),
             target: None,
+            indent: 0,
+            wrap: true,
+        }
+    }
+
+    fn indented(line: impl Into<Line<'static>>, indent: u16) -> Self {
+        Self {
+            line: line.into(),
+            target: None,
+            indent,
+            wrap: true,
         }
     }
 
@@ -2394,6 +2511,30 @@ impl TranscriptRow {
         Self {
             line: line.into(),
             target: Some(target),
+            indent: 0,
+            wrap: true,
+        }
+    }
+
+    fn single_line_clickable(line: impl Into<Line<'static>>, target: UiClickTarget) -> Self {
+        Self {
+            line: line.into(),
+            target: Some(target),
+            indent: 0,
+            wrap: false,
+        }
+    }
+
+    fn indented_clickable(
+        line: impl Into<Line<'static>>,
+        indent: u16,
+        target: UiClickTarget,
+    ) -> Self {
+        Self {
+            line: line.into(),
+            target: Some(target),
+            indent,
+            wrap: true,
         }
     }
 }
@@ -2460,13 +2601,11 @@ fn transcript_rows(state: &UiState) -> Vec<TranscriptRow> {
                         Span::styled(text.clone(), Style::default().fg(VY_MUTED)),
                     ])));
                 }
-                TurnEvent::Tool(tool) if state.trace_visible => append_tool_rows(
-                    &mut rows,
-                    tool,
-                    turn_index,
-                    event_index,
-                    state.inspect_visible,
-                ),
+                TurnEvent::Tool(tool) if state.trace_visible => {
+                    push_transcript_spacer(&mut rows);
+                    append_tool_rows(&mut rows, tool, turn_index, event_index);
+                    push_transcript_spacer(&mut rows);
+                }
                 TurnEvent::Answer(answer) => append_answer_rows(&mut rows, answer),
                 TurnEvent::System(message) => {
                     for line in message.lines() {
@@ -2502,9 +2641,8 @@ fn transcript_rows(state: &UiState) -> Vec<TranscriptRow> {
                 || "none  [click inspect]".to_string(),
                 |scratchpad| {
                     format!(
-                        "{} {} tokens  [click inspect]",
-                        scratchpad.tokens.tokens,
-                        scratchpad.tokens.source.label()
+                        "{} estimated tokens  [click inspect]",
+                        scratchpad.tokens.tokens
                     )
                 },
             );
@@ -2548,27 +2686,31 @@ fn append_answer_rows(rows: &mut Vec<TranscriptRow>, answer: &str) {
             .or_else(|| trimmed.strip_prefix("## "))
             .or_else(|| trimmed.strip_prefix("# "))
             .unwrap_or(raw);
-        rows.push(TranscriptRow::new(
-            Line::from(vec![
-                Span::styled("   ", Style::default()),
-                Span::styled(
-                    rendered.to_string(),
-                    Style::default()
-                        .fg(if in_code { VY_TECH_STRONG } else { VY_TEXT })
-                        .bg(if in_code {
-                            VY_SURFACE_RAISED
-                        } else {
-                            VY_SURFACE
-                        })
-                        .add_modifier(if raw != rendered {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                ),
-            ])
+        rows.push(TranscriptRow::indented(
+            Line::from(Span::styled(
+                rendered.to_string(),
+                Style::default()
+                    .fg(if in_code { VY_TECH_STRONG } else { VY_TEXT })
+                    .bg(if in_code {
+                        VY_SURFACE_RAISED
+                    } else {
+                        VY_SURFACE
+                    })
+                    .add_modifier(if raw != rendered {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ))
             .style(Style::default().bg(VY_SURFACE)),
+            3,
         ));
+    }
+}
+
+fn push_transcript_spacer(rows: &mut Vec<TranscriptRow>) {
+    if rows.last().is_some_and(|row| row.line.width() > 0) {
+        rows.push(TranscriptRow::new(""));
     }
 }
 
@@ -2577,7 +2719,6 @@ fn append_tool_rows(
     tool: &ToolCard,
     turn_index: usize,
     event_index: usize,
-    inspect_visible: bool,
 ) {
     let (state_label, state_color) = match tool.state {
         ToolState::Running => ("running", VY_VIOLET),
@@ -2594,16 +2735,16 @@ fn append_tool_rows(
         event_index,
     };
     let summary = summarize_tool_input(&tool.input);
+    let scratchpad_badge = tool.scratchpad.as_ref().map_or_else(
+        || "◇ …".to_string(),
+        |scratchpad| format!("◇ {}t", scratchpad.tokens.tokens),
+    );
     let header = Line::from(vec![
         Span::styled(
-            if inspect_visible {
-                if tool.expanded {
-                    "     ▾  "
-                } else {
-                    "     ▸  "
-                }
+            if tool.expanded {
+                "     ▾  "
             } else {
-                "     ·  "
+                "     ▸  "
             },
             Style::default().fg(if tool.expanded {
                 VY_VIOLET_HOVER
@@ -2616,49 +2757,73 @@ fn append_tool_rows(
             Style::default().fg(VY_VIOLET_HOVER),
         ),
         Span::styled("  ", Style::default()),
-        Span::styled(summary, Style::default().fg(VY_TECH_STRONG)),
+        Span::styled(state_label, Style::default().fg(state_color)),
         Span::styled(
             format!("  {:.2}s  ", elapsed.as_secs_f64()),
             Style::default().fg(VY_DIM),
         ),
-        Span::styled(state_label, Style::default().fg(state_color)),
-        Span::styled(
-            if inspect_visible { "  [click]" } else { "" },
-            Style::default().fg(VY_DIM),
-        ),
+        Span::styled(scratchpad_badge, Style::default().fg(VY_VIOLET_HOVER)),
+        Span::styled("  ", Style::default()),
+        Span::styled(summary, Style::default().fg(VY_TECH_STRONG)),
+        Span::styled("  [details]", Style::default().fg(VY_DIM)),
     ]);
-    if inspect_visible {
-        rows.push(TranscriptRow::clickable(header, target));
-    } else {
-        rows.push(TranscriptRow::new(header));
-    }
-    if !inspect_visible || !tool.expanded {
+    rows.push(TranscriptRow::single_line_clickable(header, target));
+    if !tool.expanded {
         return;
     }
     if !tool.input.trim().is_empty() {
-        rows.push(TranscriptRow::new(Line::from(vec![
-            Span::styled("        input  ", Style::default().fg(VY_DIM)),
-            Span::styled(tool.input.clone(), Style::default().fg(VY_TECH_STRONG)),
-        ])));
+        rows.push(TranscriptRow::indented(
+            Line::from(vec![
+                Span::styled("input  ", Style::default().fg(VY_DIM)),
+                Span::styled(tool.input.clone(), Style::default().fg(VY_TECH_STRONG)),
+            ]),
+            8,
+        ));
     }
     if !tool.output.trim().is_empty() {
         for output in tool.output.lines().take(8) {
-            rows.push(TranscriptRow::new(Line::from(vec![
-                Span::styled("        output ", Style::default().fg(VY_DIM)),
-                Span::styled(output.to_string(), Style::default().fg(VY_TECH)),
-            ])));
+            rows.push(TranscriptRow::indented(
+                Line::from(vec![
+                    Span::styled("output ", Style::default().fg(VY_DIM)),
+                    Span::styled(output.to_string(), Style::default().fg(VY_TECH)),
+                ]),
+                8,
+            ));
         }
         if tool.output.lines().count() > 8 {
-            rows.push(TranscriptRow::new(Line::from(vec![
-                Span::styled("               ", Style::default()),
+            rows.push(TranscriptRow::indented(
                 Span::styled("… preview truncated", Style::default().fg(VY_DIM)),
-            ])));
+                15,
+            ));
         }
     }
-    rows.push(TranscriptRow::new(Span::styled(
-        "        └─────────────────────────────────────",
-        Style::default().fg(VY_BORDER_STRONG),
-    )));
+    let scratchpad_meta = tool.scratchpad.as_ref().map_or_else(
+        || "none (compaction pending or unavailable)".to_string(),
+        |scratchpad| {
+            format!(
+                "{} estimated tokens  [click inspect]",
+                scratchpad.tokens.tokens
+            )
+        },
+    );
+    rows.push(TranscriptRow::indented_clickable(
+        Line::from(vec![
+            Span::styled("◇ scratchpad", Style::default().fg(VY_VIOLET_HOVER)),
+            Span::styled(format!(" · {scratchpad_meta}"), Style::default().fg(VY_DIM)),
+        ]),
+        8,
+        UiClickTarget::ToolScratchpad {
+            turn_index,
+            event_index,
+        },
+    ));
+    rows.push(TranscriptRow::indented(
+        Span::styled(
+            "└─────────────────────────────────────",
+            Style::default().fg(VY_BORDER_STRONG),
+        ),
+        8,
+    ));
 }
 
 fn render_composer(frame: &mut ratatui::Frame<'_>, area: Rect, state: &UiState) {
@@ -3195,6 +3360,7 @@ mod tests {
         state.apply_update(TuiUpdate::AssistantDelta(
             "18 tests passed. No failures.".to_string(),
         ));
+        state.inspect_visible = false;
 
         let text = transcript_lines(&state)
             .iter()
@@ -3211,6 +3377,15 @@ mod tests {
             .find(|line| line.contains("tool.batch"))
             .unwrap();
         assert!(tool_line.starts_with("     ▸  "), "{tool_line}");
+        let rows = transcript_rows(&state);
+        let tool_index = rows
+            .iter()
+            .position(|row| matches!(row.target, Some(UiClickTarget::ToolDetails { .. })))
+            .unwrap();
+        assert!(!rows[tool_index].wrap);
+        assert_eq!(transcript_row_height(&rows[tool_index], 64), 1);
+        assert_eq!(rows[tool_index - 1].line.width(), 0);
+        assert_eq!(rows[tool_index + 1].line.width(), 0);
 
         state.toggle_tool_details(0, 0);
         let expanded = transcript_lines(&state)
@@ -3228,7 +3403,7 @@ mod tests {
     }
 
     #[test]
-    fn every_interaction_keeps_its_response_counted_scratchpad() {
+    fn every_interaction_keeps_its_deterministic_scratchpad() {
         let mut state = UiState::new(snapshot());
         for (index, tokens) in [17, 29].into_iter().enumerate() {
             state.begin_turn(&UserTurnInput {
@@ -3250,11 +3425,11 @@ mod tests {
         let rows = transcript_rows(&state);
         assert!(rows.iter().any(|row| {
             row.target == Some(UiClickTarget::TurnScratchpad(0))
-                && row.line.to_string().contains("17 provider tokens")
+                && row.line.to_string().contains("17 estimated tokens")
         }));
         assert!(rows.iter().any(|row| {
             row.target == Some(UiClickTarget::TurnScratchpad(1))
-                && row.line.to_string().contains("29 provider tokens")
+                && row.line.to_string().contains("29 estimated tokens")
         }));
         assert!(rows.iter().any(|row| {
             row.target == Some(UiClickTarget::TurnScratchpad(2))
@@ -3263,10 +3438,10 @@ mod tests {
 
         state.open_turn_scratchpad(0);
         assert!(state.inspector_body.contains("retained fact 1"));
-        assert!(state.inspector_body.contains("17 provider tokens"));
+        assert!(state.inspector_body.contains("17 estimated tokens"));
         state.open_turn_scratchpad(1);
         assert!(state.inspector_body.contains("retained fact 2"));
-        assert!(state.inspector_body.contains("29 provider tokens"));
+        assert!(state.inspector_body.contains("29 estimated tokens"));
         state.open_turn_scratchpad(2);
         assert!(
             state
@@ -3326,8 +3501,32 @@ mod tests {
             &state.turns[0].events[0],
             TurnEvent::Tool(ToolCard { expanded: true, .. })
         ));
+        assert!(matches!(
+            &state.turns[0].events[0],
+            TurnEvent::Tool(ToolCard {
+                scratchpad: Some(ScratchpadView { tokens, .. }),
+                ..
+            }) if *tokens == TokenCount::provider(18)
+        ));
+        terminal.draw(|frame| render(frame, &mut state)).unwrap();
+        let tool_scratchpad = state
+            .transcript_click_regions
+            .iter()
+            .find(|region| matches!(region.target, UiClickTarget::ToolScratchpad { .. }))
+            .copied()
+            .unwrap();
+        assert_eq!(
+            transcript_click_target(&state, tool_scratchpad.area.x, tool_scratchpad.area.y),
+            Some(tool_scratchpad.target)
+        );
+        activate_local_click_target(tool_scratchpad.target, &mut state);
+        assert_eq!(state.inspected_tool, Some((0, 0)));
+        assert!(state.inspector_body.contains("tool.batch scratchpad"));
+        assert!(state.inspector_body.contains("18 estimated tokens"));
+
         activate_local_click_target(scratchpad.target, &mut state);
         assert_eq!(state.inspected_turn, Some(0));
+        assert_eq!(state.inspected_tool, None);
         assert!(state.inspector_body.contains("retained exact date"));
     }
 
@@ -3415,6 +3614,39 @@ mod tests {
         assert_eq!(buffer[(79, user_y)].bg, VY_SURFACE_RAISED);
         assert_eq!(buffer[(0, assistant_y)].bg, VY_SURFACE);
         assert_eq!(buffer[(79, assistant_y)].bg, VY_SURFACE);
+    }
+
+    #[test]
+    fn wrapped_assistant_rows_preserve_the_three_column_indent() {
+        let backend = TestBackend::new(64, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new(snapshot());
+        state.inspect_visible = false;
+        state.begin_turn(&UserTurnInput {
+            text: "wrap this response".to_string(),
+            images: Vec::new(),
+        });
+        state.apply_update(TuiUpdate::AssistantDelta(
+            "WRAPWORD ".repeat(24).trim_end().to_string(),
+        ));
+        state.apply_update(TuiUpdate::AssistantDone);
+        state.finish_turn(None);
+
+        terminal.draw(|frame| render(frame, &mut state)).unwrap();
+        let rows = buffer_text(terminal.backend().buffer())
+            .lines()
+            .filter(|row| row.contains("WRAPWORD"))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+
+        assert!(rows.len() >= 3, "{rows:?}");
+        assert!(
+            rows.iter().all(|row| {
+                row.find("WRAPWORD")
+                    .is_some_and(|start| row[..start].chars().count() == 3)
+            }),
+            "{rows:?}"
+        );
     }
 
     #[test]
