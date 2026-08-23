@@ -20,9 +20,10 @@ use crate::tools::{
     ASK_USER_TOOL_NAME, AskUserAnswer, AskUserRequest, AskUserResponse, MachineManifest, ToolResult,
 };
 use crate::vision;
-use crossterm::cursor::{MoveToColumn, MoveUp, RestorePosition, SavePosition};
+use crossterm::cursor::{MoveTo, MoveToColumn, MoveUp};
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::style::{
@@ -152,15 +153,46 @@ const SYSTEM_SURFACE: Color = VY_SURFACE;
 pub struct Repl {
     app: App,
     last_scratchpad: TurnScratchpad,
+    last_scratchpad_tokens: TokenCount,
     prompt_history: Vec<String>,
     plain_lines: Option<Lines<BufReader<tokio::io::Stdin>>>,
     input_pause: Arc<AtomicBool>,
 }
 
+struct ScratchpadUpdate {
+    scratchpad: TurnScratchpad,
+    output_tokens: TokenCount,
+}
+
 #[derive(Debug, Clone, Default)]
-struct UserTurnInput {
-    text: String,
-    images: Vec<ImageAttachment>,
+pub(super) struct UserTurnInput {
+    pub text: String,
+    pub images: Vec<ImageAttachment>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ReplSnapshot {
+    pub cwd: String,
+    pub model_name: String,
+    pub base_url: String,
+    pub debug_path: Option<String>,
+    pub context_used: usize,
+    pub context_limit: usize,
+    pub context_system: usize,
+    pub context_history: usize,
+    pub context_scratch: usize,
+    pub turns: usize,
+    pub session_spent: usize,
+    pub turn_saved: isize,
+    pub session_saved: isize,
+    pub manifest: String,
+    pub skills: String,
+    pub stats: String,
+    pub context: String,
+    pub scratchpad: String,
+    pub debug: String,
+    pub models: Vec<String>,
+    pub prompt_history: Vec<String>,
 }
 
 impl Repl {
@@ -169,6 +201,7 @@ impl Repl {
         Self {
             app,
             last_scratchpad: TurnScratchpad::default(),
+            last_scratchpad_tokens: TokenCount::default(),
             prompt_history,
             plain_lines: None,
             input_pause: Arc::new(AtomicBool::new(false)),
@@ -202,6 +235,24 @@ impl Repl {
                 "exit"
             };
             let _ = trace.finish(reason);
+        }
+        result
+    }
+
+    pub async fn run_fullscreen(mut self) -> anyhow::Result<()> {
+        if self.app.prompt.is_some() {
+            anyhow::bail!("vyrn tui is interactive and cannot be combined with --prompt");
+        }
+        self.debug_log(format!(
+            "session_start interface=fullscreen model={} base_url={} context={} verbose={}",
+            self.app.model.name,
+            self.app.model.base_url,
+            self.app.config.context.max_tokens,
+            self.app.verbose
+        ));
+        let result = crate::tui::fullscreen::run(&mut self).await;
+        if let Some(trace) = self.app.trace.as_mut() {
+            let _ = trace.finish("exit");
         }
         result
     }
@@ -300,7 +351,7 @@ impl Repl {
                 active_input_tx,
             );
             let result = self
-                .handle_user_turn_with_active_input(input, &mut active_input_rx, |update| {
+                .handle_user_turn_with_active_input(input, &mut active_input_rx, false, |update| {
                     match update {
                         TuiUpdate::SummaryStart => {
                             if let Some(spinner) = spinner.take() {
@@ -368,7 +419,7 @@ impl Repl {
                             assistant_renderer = MarkdownStreamRenderer::new();
                             let _ = clear_active_turn_input();
                         }
-                        TuiUpdate::ToolStarted(name) => {
+                        TuiUpdate::ToolStarted { name, .. } => {
                             if let Some(spinner) = spinner.take() {
                                 spinner.stop();
                             }
@@ -403,7 +454,7 @@ impl Repl {
                                 Arc::clone(&active_input_buffer),
                             ));
                         }
-                        TuiUpdate::ScratchpadDone => {
+                        TuiUpdate::ScratchpadDone { .. } => {
                             if let Some(spinner) = spinner.take() {
                                 spinner.stop();
                             }
@@ -420,6 +471,7 @@ impl Repl {
                         TuiUpdate::Summary(summary) => {
                             let _ = print_system_block(&format!("summary\n{summary}"));
                         }
+                        TuiUpdate::Clarification(_) => {}
                     }
                 })
                 .await;
@@ -487,6 +539,7 @@ impl Repl {
                 self.app.context.clear();
                 self.app.stats = Default::default();
                 self.last_scratchpad = TurnScratchpad::default();
+                self.last_scratchpad_tokens = TokenCount::default();
                 self.rotate_debug_trace("clear");
                 println!("cleared session context");
                 Ok(false)
@@ -559,6 +612,7 @@ impl Repl {
                 self.app.context.clear();
                 self.app.stats = Default::default();
                 self.last_scratchpad = TurnScratchpad::default();
+                self.last_scratchpad_tokens = TokenCount::default();
                 self.rotate_debug_trace("clear");
                 *composer_status = self.composer_status_line();
                 clear_screen()?;
@@ -597,7 +651,7 @@ impl Repl {
             }
             TuiUpdate::AssistantDone => println!(),
             TuiUpdate::AssistantInterrupted => println!(),
-            TuiUpdate::ToolStarted(name) => println!("\n[tool {name}]"),
+            TuiUpdate::ToolStarted { name, .. } => println!("\n[tool {name}]"),
             TuiUpdate::ToolInputStart => {}
             TuiUpdate::ToolOk { name, preview } => {
                 println!("[{name} ok]");
@@ -610,10 +664,11 @@ impl Repl {
                 print!("[updating turn memory...] ");
                 let _ = std::io::stdout().flush();
             }
-            TuiUpdate::ScratchpadDone => println!(),
+            TuiUpdate::ScratchpadDone { .. } => println!(),
             TuiUpdate::Steering(text) => println!("[live steering] {text}"),
             TuiUpdate::Stats(stats) => println!("{stats}"),
             TuiUpdate::Summary(summary) => println!("[summary]\n{summary}"),
+            TuiUpdate::Clarification(_) => {}
         })
         .await
     }
@@ -627,7 +682,20 @@ impl Repl {
         F: FnMut(TuiUpdate),
     {
         let (_active_input_tx, mut active_input_rx) = tokio::sync::mpsc::unbounded_channel();
-        self.handle_user_turn_with_active_input(user_input, &mut active_input_rx, emit)
+        self.handle_user_turn_with_active_input(user_input, &mut active_input_rx, false, emit)
+            .await
+    }
+
+    pub(super) async fn handle_user_turn_fullscreen<F>(
+        &mut self,
+        user_input: UserTurnInput,
+        active_input: &mut tokio::sync::mpsc::UnboundedReceiver<ActiveTurnInput>,
+        emit: F,
+    ) -> Result<(), LlmError>
+    where
+        F: FnMut(TuiUpdate),
+    {
+        self.handle_user_turn_with_active_input(user_input, active_input, true, emit)
             .await
     }
 
@@ -635,6 +703,7 @@ impl Repl {
         &mut self,
         user_input: UserTurnInput,
         active_input: &mut tokio::sync::mpsc::UnboundedReceiver<ActiveTurnInput>,
+        fullscreen: bool,
         mut emit: F,
     ) -> Result<(), LlmError>
     where
@@ -726,6 +795,11 @@ impl Repl {
                 emit(TuiUpdate::Steering(text.clone()));
                 steering_inputs.push(text);
             }
+            Err(ActiveTurnInput::Clarification(_)) => {
+                return Err(LlmError::Input(
+                    "received a clarification response without an active question".to_string(),
+                ));
+            }
         }
         emit(TuiUpdate::SummaryDone);
 
@@ -741,6 +815,7 @@ impl Repl {
         let base_messages = prompt.messages;
         let mut scratchpad = TurnScratchpad::default();
         self.last_scratchpad = scratchpad.clone();
+        self.last_scratchpad_tokens = TokenCount::default();
         let mut current_tool_batch = steering_inputs
             .iter()
             .map(|text| live_steering_message(text))
@@ -761,6 +836,12 @@ impl Repl {
                         emit(TuiUpdate::Steering(text.clone()));
                         current_tool_batch.push(live_steering_message(&text));
                         steering_inputs.push(text);
+                    }
+                    ActiveTurnInput::Clarification(_) => {
+                        return Err(LlmError::Input(
+                            "received a clarification response without an active question"
+                                .to_string(),
+                        ));
                     }
                 }
             }
@@ -831,7 +912,10 @@ impl Repl {
                         emit(TuiUpdate::AssistantDelta(delta));
                     }
                     StreamEvent::ToolCallDone(call) => {
-                        emit(TuiUpdate::ToolStarted(call.function.name));
+                        emit(TuiUpdate::ToolStarted {
+                            name: call.function.name,
+                            input: call.function.arguments,
+                        });
                     }
                     StreamEvent::Finished => {}
                 });
@@ -883,6 +967,12 @@ impl Repl {
                             current_tool_batch.push(live_steering_message(&text));
                             steering_inputs.push(text);
                             continue 'agent_rounds;
+                        }
+                        ActiveTurnInput::Clarification(_) => {
+                            return Err(LlmError::Input(
+                                "received a clarification response without an active question"
+                                    .to_string(),
+                            ));
                         }
                     }
                 }
@@ -951,7 +1041,11 @@ impl Repl {
                 if call.function.name == ASK_USER_TOOL_NAME {
                     emit(TuiUpdate::ToolInputStart);
                 }
-                let result_or_input = if call.function.name == ASK_USER_TOOL_NAME {
+                let result_or_input = if call.function.name == ASK_USER_TOOL_NAME && fullscreen {
+                    Ok(self
+                        .execute_ask_user_fullscreen(&call, active_input, &mut emit)
+                        .await)
+                } else if call.function.name == ASK_USER_TOOL_NAME {
                     Ok(self.execute_tool_call(&call).await)
                 } else {
                     tokio::select! {
@@ -985,6 +1079,12 @@ impl Repl {
                         scratchpad = next_context.scratchpad;
                         current_tool_batch = next_context.tool_batch;
                         continue 'agent_rounds;
+                    }
+                    Err(ActiveTurnInput::Clarification(_)) => {
+                        return Err(LlmError::Input(
+                            "received a clarification response without an active question"
+                                .to_string(),
+                        ));
                     }
                 };
                 if matches!(result, Err(crate::tools::ToolError::Canceled)) {
@@ -1043,11 +1143,34 @@ impl Repl {
                     last_tool_index,
                 ) => Ok(result),
             };
-            emit(TuiUpdate::ScratchpadDone);
             scratchpad = match scratchpad_or_input {
-                Ok(result) => result?,
-                Err(ActiveTurnInput::Cancel) => return Err(LlmError::Canceled),
+                Ok(Ok(update)) => {
+                    emit(TuiUpdate::ScratchpadDone {
+                        summary: Some(update.scratchpad.summary.clone()),
+                        output_tokens: Some(update.output_tokens),
+                    });
+                    self.last_scratchpad_tokens = update.output_tokens;
+                    update.scratchpad
+                }
+                Ok(Err(error)) => {
+                    emit(TuiUpdate::ScratchpadDone {
+                        summary: None,
+                        output_tokens: None,
+                    });
+                    return Err(error);
+                }
+                Err(ActiveTurnInput::Cancel) => {
+                    emit(TuiUpdate::ScratchpadDone {
+                        summary: None,
+                        output_tokens: None,
+                    });
+                    return Err(LlmError::Canceled);
+                }
                 Err(ActiveTurnInput::Steering(text)) => {
+                    emit(TuiUpdate::ScratchpadDone {
+                        summary: None,
+                        output_tokens: None,
+                    });
                     self.debug_log(format!("live_steering_scratchpad_interrupt round={round}"));
                     emit(TuiUpdate::Steering(text.clone()));
                     current_tool_batch.push(live_steering_message(&text));
@@ -1063,13 +1186,23 @@ impl Repl {
                     current_tool_batch = next_context.tool_batch;
                     continue 'agent_rounds;
                 }
+                Err(ActiveTurnInput::Clarification(_)) => {
+                    emit(TuiUpdate::ScratchpadDone {
+                        summary: None,
+                        output_tokens: None,
+                    });
+                    return Err(LlmError::Input(
+                        "received a clarification response without an active question".to_string(),
+                    ));
+                }
             };
             self.last_scratchpad = scratchpad.clone();
             self.debug_log(format!(
-                "turn_scratchpad_update round={} tools={} tokens={} chars={}",
+                "turn_scratchpad_update round={} tools={} tokens={} token_source={} chars={}",
                 round,
                 tool_count,
-                crate::agent::tokens::estimate_text_tokens(&scratchpad.summary),
+                self.last_scratchpad_tokens.tokens,
+                self.last_scratchpad_tokens.source.label(),
                 scratchpad.summary.chars().count()
             ));
             let next_context = prepare_next_turn_context(
@@ -1149,7 +1282,7 @@ impl Repl {
         usage: &mut TurnUsage,
         round: usize,
         tool_index: usize,
-    ) -> Result<TurnScratchpad, LlmError> {
+    ) -> Result<ScratchpadUpdate, LlmError> {
         let max_tokens = self.app.config.context.max_tokens;
         let source = turn_scratchpad_update_source(consumed_tool_batch, assistant_response);
         let messages =
@@ -1235,7 +1368,10 @@ impl Repl {
             output.source.label(),
             crate::agent::tokens::estimate_text_tokens(&summary)
         ));
-        Ok(TurnScratchpad { summary })
+        Ok(ScratchpadUpdate {
+            scratchpad: TurnScratchpad { summary },
+            output_tokens: output,
+        })
     }
 
     fn debug_log(&self, event: impl AsRef<str>) {
@@ -1258,6 +1394,40 @@ impl Repl {
         };
         let _ = trace.finish(reason);
         self.app.trace = TraceRecorder::interactive(&self.app.sources, &self.app.client).ok();
+    }
+
+    async fn execute_ask_user_fullscreen<F>(
+        &mut self,
+        call: &ToolCall,
+        active_input: &mut tokio::sync::mpsc::UnboundedReceiver<ActiveTurnInput>,
+        emit: &mut F,
+    ) -> Result<ToolResult, crate::tools::ToolError>
+    where
+        F: FnMut(TuiUpdate),
+    {
+        let input = if call.function.arguments.trim().is_empty() {
+            Value::Object(Default::default())
+        } else {
+            serde_json::from_str(&call.function.arguments).map_err(|error| {
+                crate::tools::ToolError::InvalidInput {
+                    tool: call.function.name.clone(),
+                    message: error.to_string(),
+                }
+            })?
+        };
+        let request = AskUserRequest::parse(input)?;
+        emit(TuiUpdate::Clarification(request));
+        loop {
+            match active_input.recv().await {
+                Some(ActiveTurnInput::Clarification(response)) => {
+                    return response.into_tool_result();
+                }
+                Some(ActiveTurnInput::Cancel) | None => {
+                    return Err(crate::tools::ToolError::Canceled);
+                }
+                Some(ActiveTurnInput::Steering(_)) => {}
+            }
+        }
     }
 
     async fn execute_tool_call(
@@ -1551,8 +1721,9 @@ impl Repl {
             "turn scratchpad: none (no tool-driven context has been compacted yet)".to_string()
         } else {
             format!(
-                "turn scratchpad ({} estimated tokens):\n{}",
-                crate::agent::tokens::estimate_text_tokens(&self.last_scratchpad.summary),
+                "turn scratchpad ({} {} tokens from generation response):\n{}",
+                self.last_scratchpad_tokens.tokens,
+                self.last_scratchpad_tokens.source.label(),
                 self.last_scratchpad.summary.trim()
             )
         }
@@ -1576,6 +1747,97 @@ impl Repl {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    pub(super) fn fullscreen_snapshot(&self) -> ReplSnapshot {
+        let context_used = self.current_context_tokens();
+        let context_limit = self.app.config.context.max_tokens;
+        let breakdown = self
+            .app
+            .stats
+            .turns
+            .last()
+            .and_then(|turn| turn.calls.last())
+            .map(|call| call.breakdown)
+            .unwrap_or_default();
+        let context_scratch = self.last_scratchpad_tokens.tokens.min(context_used);
+        let context_system = breakdown
+            .system_prompt
+            .saturating_add(breakdown.skills)
+            .saturating_add(breakdown.tool_schemas)
+            .saturating_add(breakdown.overhead)
+            .min(context_used.saturating_sub(context_scratch));
+        let context_history = context_used
+            .saturating_sub(context_system)
+            .saturating_sub(context_scratch);
+        let turn_saved = self
+            .app
+            .stats
+            .turns
+            .last()
+            .map(|turn| turn.saved)
+            .unwrap_or_default();
+
+        ReplSnapshot {
+            cwd: self.app.sources.project_root.display().to_string(),
+            model_name: self.app.model.name.clone(),
+            base_url: self.app.model.base_url.clone(),
+            debug_path: self
+                .app
+                .trace
+                .as_ref()
+                .map(|trace| trace.path().display().to_string()),
+            context_used,
+            context_limit,
+            context_system,
+            context_history,
+            context_scratch,
+            turns: self.app.stats.turns.len(),
+            session_spent: self.app.stats.session_sent,
+            turn_saved,
+            session_saved: self.app.stats.session_saved,
+            manifest: self.app.manifest.compact(),
+            skills: self.skills_text(),
+            stats: self.full_stats_text(),
+            context: self.context_text(),
+            scratchpad: self.scratchpad_text(),
+            debug: self.debug_status_text(),
+            models: self
+                .app
+                .models
+                .list()
+                .map(|model| model.name.clone())
+                .collect(),
+            prompt_history: self.prompt_history.clone(),
+        }
+    }
+
+    pub(super) fn fullscreen_clear(&mut self) {
+        self.app.context.clear();
+        self.app.stats = Default::default();
+        self.last_scratchpad = TurnScratchpad::default();
+        self.last_scratchpad_tokens = TokenCount::default();
+        self.rotate_debug_trace("clear");
+    }
+
+    pub(super) fn fullscreen_refresh_manifest(&mut self) {
+        self.refresh_manifest();
+    }
+
+    pub(super) fn fullscreen_switch_model(&mut self, name: &str) -> bool {
+        let Some(model) = self.app.models.get(name) else {
+            return false;
+        };
+        self.switch_model(model, true);
+        true
+    }
+
+    pub(super) fn fullscreen_remember_prompt(&mut self, input: &str) {
+        self.remember_prompt(input);
+    }
+
+    pub(super) fn fullscreen_format_error(&self, error: &LlmError) -> String {
+        format_error(error, self.app.debug)
+    }
 }
 
 fn help_text() -> String {
@@ -1587,6 +1849,8 @@ fn help_text() -> String {
     lines.push("controls".to_string());
     lines.push("  / or Ctrl+O  open command palette".to_string());
     lines.push("  Up/Down      select command or recall prompt".to_string());
+    lines.push("  Left click   run a visible palette command".to_string());
+    lines.push("  Mouse wheel  move through palette commands".to_string());
     lines.push("  Tab           accept selected command".to_string());
     lines.push("  type + Enter  steer the agent during an active turn".to_string());
     lines.push("  Esc           cancel active turn; exit from composer".to_string());
@@ -1874,22 +2138,35 @@ fn prompt_optional(label: &str) -> anyhow::Result<String> {
 }
 
 #[derive(Debug, Clone)]
-enum TuiUpdate {
+pub(super) enum TuiUpdate {
     SummaryStart,
     SummaryDone,
     AssistantStart,
     AssistantDelta(String),
     AssistantDone,
     AssistantInterrupted,
-    ToolStarted(String),
+    ToolStarted {
+        name: String,
+        input: String,
+    },
     ToolInputStart,
-    ToolOk { name: String, preview: String },
-    ToolError { name: String, error: String },
+    ToolOk {
+        name: String,
+        preview: String,
+    },
+    ToolError {
+        name: String,
+        error: String,
+    },
     ScratchpadStart,
-    ScratchpadDone,
+    ScratchpadDone {
+        summary: Option<String>,
+        output_tokens: Option<TokenCount>,
+    },
     Steering(String),
     Stats(String),
     Summary(String),
+    Clarification(AskUserRequest),
 }
 
 enum ClarificationChoice {
@@ -1897,9 +2174,10 @@ enum ClarificationChoice {
     Other,
 }
 
-enum ActiveTurnInput {
+pub(super) enum ActiveTurnInput {
     Steering(String),
     Cancel,
+    Clarification(AskUserResponse),
 }
 
 struct InputPauseGuard {
@@ -1935,6 +2213,21 @@ impl Drop for RawModeGuard {
     fn drop(&mut self) {
         let _ = execute!(std::io::stdout(), DisableBracketedPaste);
         let _ = disable_raw_mode();
+    }
+}
+
+struct MouseCaptureGuard;
+
+impl MouseCaptureGuard {
+    fn enter() -> anyhow::Result<Self> {
+        execute!(std::io::stdout(), EnableMouseCapture)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for MouseCaptureGuard {
+    fn drop(&mut self) {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
     }
 }
 
@@ -2556,17 +2849,58 @@ fn print_stats_line(segments: &[(String, Color)]) -> anyhow::Result<()> {
 
 fn read_composer_line(status: &str, history: &[String]) -> anyhow::Result<UserTurnInput> {
     let mut state = ComposerState::default();
-    execute!(std::io::stdout(), SavePosition)?;
-    render_composer_state(&state, status)?;
+    let mut mouse_capture = None;
+    let (width, height) = size().unwrap_or((80, 24));
+    let (_, origin_row) = crossterm::cursor::position()?;
+    let mut layout = ComposerLayout::new(origin_row, width, height);
+    render_composer_state(&state, status, &mut layout, (width, height))?;
 
     loop {
-        match event::read()? {
-            Event::Key(key) => match handle_composer_key(key, &mut state, history)? {
+        let action = match event::read()? {
+            Event::Key(key) => Some(handle_composer_key(key, &mut state, history)?),
+            Event::Mouse(mouse) => {
+                if !matches!(
+                    mouse.kind,
+                    MouseEventKind::Down(_)
+                        | MouseEventKind::Up(_)
+                        | MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown
+                ) {
+                    continue;
+                }
+                let mut mouse_layout = layout;
+                if let Ok((_, cursor_row)) = crossterm::cursor::position() {
+                    mouse_layout.origin_row =
+                        cursor_row.min(mouse_layout.terminal_height.saturating_sub(1));
+                }
+                handle_composer_mouse(mouse, &mut state, &mouse_layout)
+            }
+            Event::Paste(text) => {
+                reset_history_navigation(&mut state);
+                state.input.push_str(&text);
+                reset_completion(&mut state.completion);
+                Some(ComposerAction::Continue)
+            }
+            Event::Resize(width, height) => {
+                render_composer_state(&state, status, &mut layout, (width, height))?;
+                None
+            }
+            _ => None,
+        };
+
+        if let Some(action) = action {
+            match action {
                 ComposerAction::Continue => {
-                    render_composer_state(&state, status)?;
+                    sync_mouse_capture(
+                        &mut mouse_capture,
+                        !slash_completion_matches(&state.input).is_empty(),
+                    )?;
+                    let terminal_size =
+                        size().unwrap_or((layout.terminal_width, layout.terminal_height));
+                    render_composer_state(&state, status, &mut layout, terminal_size)?;
                 }
                 ComposerAction::Submit => {
-                    clear_composer()?;
+                    clear_composer(&layout)?;
                     print_user_block(&state.input, state.images.len())?;
                     return Ok(UserTurnInput {
                         text: state.input,
@@ -2574,27 +2908,48 @@ fn read_composer_line(status: &str, history: &[String]) -> anyhow::Result<UserTu
                     });
                 }
                 ComposerAction::Exit => {
+                    clear_composer(&layout)?;
                     return Ok(UserTurnInput {
                         text: "/exit".to_string(),
                         images: Vec::new(),
                     });
                 }
-            },
-            Event::Paste(text) => {
-                reset_history_navigation(&mut state);
-                state.input.push_str(&text);
-                reset_completion(&mut state.completion);
-                render_composer_state(&state, status)?;
             }
-            _ => {}
         }
     }
 }
 
-fn render_composer_state(state: &ComposerState, status: &str) -> anyhow::Result<()> {
+fn sync_mouse_capture(
+    capture: &mut Option<MouseCaptureGuard>,
+    palette_visible: bool,
+) -> anyhow::Result<()> {
+    match (palette_visible, capture.is_some()) {
+        (true, false) => *capture = Some(MouseCaptureGuard::enter()?),
+        (false, true) => *capture = None,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn render_composer_state(
+    state: &ComposerState,
+    status: &str,
+    layout: &mut ComposerLayout,
+    terminal_size: (u16, u16),
+) -> anyhow::Result<()> {
     let completion_suffix = slash_completion_suffix(&state.input, &state.completion);
     let palette = slash_completion_matches(&state.input);
     let selected = active_slash_completion(&state.input, &state.completion);
+    let selected_index = palette
+        .iter()
+        .position(|command| Some(command.name) == selected)
+        .unwrap_or_default();
+    *layout = ComposerLayout::for_render(
+        layout.origin_row,
+        terminal_size,
+        palette.len(),
+        selected_index,
+    );
     render_composer(
         &state.input,
         state.images.len(),
@@ -2602,7 +2957,87 @@ fn render_composer_state(state: &ComposerState, status: &str) -> anyhow::Result<
         &palette,
         selected,
         status,
+        layout,
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ComposerLayout {
+    origin_row: u16,
+    render_origin_row: u16,
+    terminal_width: u16,
+    terminal_height: u16,
+    palette_start: usize,
+    palette_len: usize,
+    show_status: bool,
+    status_spacer: bool,
+}
+
+impl ComposerLayout {
+    fn new(origin_row: u16, width: u16, height: u16) -> Self {
+        let width = width.max(1);
+        let height = height.max(1);
+        let origin_row = origin_row.min(height.saturating_sub(1));
+        Self {
+            origin_row,
+            render_origin_row: origin_row,
+            terminal_width: width,
+            terminal_height: height,
+            palette_start: 0,
+            palette_len: 0,
+            show_status: height >= 2,
+            status_spacer: height >= 3,
+        }
+    }
+
+    fn for_render(
+        origin_row: u16,
+        (width, height): (u16, u16),
+        palette_count: usize,
+        selected_index: usize,
+    ) -> Self {
+        let width = width.max(1);
+        let height = height.max(1);
+        let show_status = height >= 2;
+        let status_spacer = height >= 3;
+        let palette_capacity = usize::from(height.saturating_sub(3));
+        let palette_len = palette_count.min(palette_capacity);
+        let palette_start = palette_window_start(palette_count, palette_len, selected_index);
+        let content_height =
+            1 + palette_len + usize::from(show_status) + usize::from(status_spacer);
+        let render_origin = origin_row.min(height.saturating_sub(1));
+        let overflow =
+            (usize::from(render_origin) + content_height).saturating_sub(usize::from(height));
+
+        Self {
+            origin_row: render_origin.saturating_sub(u16::try_from(overflow).unwrap_or(u16::MAX)),
+            render_origin_row: render_origin,
+            terminal_width: width,
+            terminal_height: height,
+            palette_start,
+            palette_len,
+            show_status,
+            status_spacer,
+        }
+    }
+
+    fn palette_index_at(self, column: u16, row: u16) -> Option<usize> {
+        if column >= self.terminal_width {
+            return None;
+        }
+        let offset = row.checked_sub(self.origin_row.saturating_add(1))? as usize;
+        (offset < self.palette_len).then_some(self.palette_start + offset)
+    }
+}
+
+fn palette_window_start(total: usize, visible: usize, selected: usize) -> usize {
+    if visible == 0 || total <= visible {
+        return 0;
+    }
+    selected
+        .min(total.saturating_sub(1))
+        .saturating_sub(visible / 2)
+        .min(total - visible)
 }
 
 #[derive(Default)]
@@ -2700,6 +3135,36 @@ fn handle_composer_key(
             Ok(ComposerAction::Continue)
         }
         _ => Ok(ComposerAction::Continue),
+    }
+}
+
+fn handle_composer_mouse(
+    mouse: MouseEvent,
+    state: &mut ComposerState,
+    layout: &ComposerLayout,
+) -> Option<ComposerAction> {
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
+            let command_index = layout.palette_index_at(mouse.column, mouse.row)?;
+            let command = slash_completion_matches(&state.input)
+                .get(command_index)?
+                .name;
+            reset_history_navigation(state);
+            state.input = command.to_string();
+            reset_completion(&mut state.completion);
+            Some(ComposerAction::Submit)
+        }
+        MouseEventKind::ScrollUp if layout.palette_index_at(mouse.column, mouse.row).is_some() => {
+            cycle_slash_completion(state, -1);
+            Some(ComposerAction::Continue)
+        }
+        MouseEventKind::ScrollDown
+            if layout.palette_index_at(mouse.column, mouse.row).is_some() =>
+        {
+            cycle_slash_completion(state, 1);
+            Some(ComposerAction::Continue)
+        }
+        _ => None,
     }
 }
 
@@ -2867,36 +3332,50 @@ fn render_composer(
     palette: &[SlashCommand],
     selected_command: Option<&str>,
     status: &str,
+    layout: &ComposerLayout,
 ) -> anyhow::Result<()> {
     let mut stdout = std::io::stdout();
     let input_background = GRAPHITE_SURFACE_RAISED;
+    let printable_width = usize::from(layout.terminal_width.saturating_sub(1));
+    let prompt = truncate_display("> ", printable_width);
+    let max_input_width = printable_width.saturating_sub(prompt.chars().count());
+    let visible_input = truncate_display_start(&single_line_display(input), max_input_width);
+    let cursor_column = u16::try_from(prompt.chars().count() + visible_input.chars().count())
+        .unwrap_or(u16::MAX)
+        .min(layout.terminal_width.saturating_sub(1));
     execute!(
         stdout,
-        RestorePosition,
-        MoveToColumn(0),
+        MoveTo(0, layout.render_origin_row),
         Clear(ClearType::FromCursorDown),
         SetBackgroundColor(input_background),
-        Print(terminal_fill()),
+        Print(" ".repeat(printable_width)),
         MoveToColumn(0),
         SetBackgroundColor(input_background),
         SetForegroundColor(STEEL_BLUE),
-        Print("> "),
+        Print(&prompt),
         SetBackgroundColor(input_background),
         SetForegroundColor(VY_TECH_STRONG),
-        Print(input)
+        Print(&visible_input)
     )?;
+    let mut remaining_width = max_input_width.saturating_sub(visible_input.chars().count());
     if image_count > 0 {
+        let attachment = truncate_display(
+            &format!(
+                "  [{image_count} image{}]",
+                if image_count == 1 { "" } else { "s" }
+            ),
+            remaining_width,
+        );
         execute!(
             stdout,
             SetBackgroundColor(input_background),
             SetForegroundColor(STEEL_BLUE),
-            Print(format!(
-                "  [{image_count} image{}]",
-                if image_count == 1 { "" } else { "s" }
-            ))
+            Print(&attachment)
         )?;
+        remaining_width = remaining_width.saturating_sub(attachment.chars().count());
     }
     if let Some(completion_suffix) = completion_suffix {
+        let completion_suffix = truncate_display(completion_suffix, remaining_width);
         execute!(
             stdout,
             SetBackgroundColor(input_background),
@@ -2904,8 +3383,16 @@ fn render_composer(
             Print(completion_suffix)
         )?;
     }
-    for command in palette {
+    let palette_end = layout
+        .palette_start
+        .saturating_add(layout.palette_len)
+        .min(palette.len());
+    for command in &palette[layout.palette_start.min(palette_end)..palette_end] {
         let selected = selected_command == Some(command.name);
+        let label = format!("{}{:<12}", if selected { "> " } else { "  " }, command.name);
+        let visible_label = truncate_display(&label, printable_width);
+        let description_width = printable_width.saturating_sub(visible_label.chars().count());
+        let visible_description = truncate_display(command.description, description_width);
         execute!(
             stdout,
             ResetColor,
@@ -2913,34 +3400,52 @@ fn render_composer(
             MoveToColumn(0),
             Clear(ClearType::CurrentLine),
             SetForegroundColor(if selected { VY_VIOLET } else { VY_TEXT_MUTED }),
-            Print(if selected { "> " } else { "  " }),
-            Print(format!("{:<12}", command.name)),
+            Print(visible_label),
             SetForegroundColor(VY_TEXT_DIM),
-            Print(command.description)
+            Print(visible_description)
         )?;
     }
-    let palette_rows = palette.len();
-    execute!(
-        stdout,
-        ResetColor,
-        Print("\r\n\r\n"),
-        MoveToColumn(0),
-        Clear(ClearType::CurrentLine),
-        SetForegroundColor(VY_TEXT_DIM),
-        Print(status),
-        ResetColor,
-        MoveUp((2 + palette_rows) as u16),
-        MoveToColumn((2 + input.chars().count()) as u16)
-    )?;
+    if layout.show_status {
+        execute!(stdout, ResetColor, Print("\r\n"))?;
+        if layout.status_spacer {
+            execute!(stdout, Print("\r\n"))?;
+        }
+        let status = if layout.palette_len < palette.len() {
+            if layout.palette_len == 0 {
+                format!(
+                    "commands hidden ({}) · resize taller · {status}",
+                    palette.len()
+                )
+            } else {
+                format!(
+                    "commands {}–{}/{} · click run · wheel/↑↓ select · {status}",
+                    layout.palette_start + 1,
+                    palette_end,
+                    palette.len()
+                )
+            }
+        } else if !palette.is_empty() {
+            format!("click run · wheel/↑↓ select · {status}")
+        } else {
+            status.to_string()
+        };
+        execute!(
+            stdout,
+            MoveToColumn(0),
+            Clear(ClearType::CurrentLine),
+            SetForegroundColor(VY_TEXT_DIM),
+            Print(truncate_display(&status, printable_width))
+        )?;
+    }
+    execute!(stdout, ResetColor, MoveTo(cursor_column, layout.origin_row))?;
     stdout.flush()?;
     Ok(())
 }
 
-fn clear_composer() -> anyhow::Result<()> {
+fn clear_composer(layout: &ComposerLayout) -> anyhow::Result<()> {
     execute!(
         std::io::stdout(),
-        RestorePosition,
-        MoveToColumn(0),
+        MoveTo(0, layout.origin_row),
         Clear(ClearType::FromCursorDown)
     )?;
     std::io::stdout().flush()?;
@@ -3536,6 +4041,9 @@ fn first_non_empty_line(value: &str) -> Option<&str> {
 }
 
 fn truncate_display(value: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
     if value.chars().count() <= max_chars {
         return value.to_string();
     }
@@ -3545,6 +4053,26 @@ fn truncate_display(value: &str, max_chars: usize) -> String {
         .collect::<String>();
     out.push('…');
     out
+}
+
+fn truncate_display_start(value: &str, max_chars: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut out = String::from("…");
+    out.extend(value.chars().skip(char_count - max_chars.saturating_sub(1)));
+    out
+}
+
+fn single_line_display(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect()
 }
 
 fn select_model_inline(
@@ -3701,6 +4229,102 @@ mod tests {
             active_slash_completion(&state.input, &state.completion),
             Some(first)
         );
+    }
+
+    #[test]
+    fn command_palette_layout_tracks_narrow_and_resized_terminals() {
+        let full = ComposerLayout::for_render(10, (120, 40), SLASH_COMMANDS.len(), 0);
+        assert_eq!(full.palette_start, 0);
+        assert_eq!(full.palette_len, SLASH_COMMANDS.len());
+        assert_eq!(full.origin_row, 10);
+        assert_eq!(full.palette_index_at(119, 11), Some(0));
+
+        let resized = ComposerLayout::for_render(
+            full.origin_row,
+            (24, 7),
+            SLASH_COMMANDS.len(),
+            SLASH_COMMANDS.len() - 1,
+        );
+        assert_eq!(resized.palette_len, 4);
+        assert_eq!(resized.palette_start, SLASH_COMMANDS.len() - 4);
+        assert_eq!(resized.origin_row, 0);
+        assert_eq!(resized.palette_index_at(23, 1), Some(8));
+        assert_eq!(resized.palette_index_at(23, 4), Some(11));
+        assert_eq!(resized.palette_index_at(24, 4), None);
+        assert_eq!(resized.palette_index_at(2, 5), None);
+
+        let one_row = ComposerLayout::for_render(4, (1, 1), SLASH_COMMANDS.len(), 0);
+        assert_eq!(one_row.origin_row, 0);
+        assert_eq!(one_row.palette_len, 0);
+        assert!(!one_row.show_status);
+    }
+
+    #[test]
+    fn pressing_or_releasing_a_visible_palette_row_submits_that_command() {
+        let layout = ComposerLayout::for_render(5, (80, 24), SLASH_COMMANDS.len(), 0);
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            let mut state = ComposerState {
+                input: "/".to_string(),
+                ..Default::default()
+            };
+            let click = MouseEvent {
+                kind,
+                column: 40,
+                row: layout.origin_row + 3,
+                modifiers: KeyModifiers::NONE,
+            };
+
+            let action = handle_composer_mouse(click, &mut state, &layout);
+
+            assert!(matches!(action, Some(ComposerAction::Submit)));
+            assert_eq!(state.input, "/context");
+        }
+    }
+
+    #[test]
+    fn mouse_wheel_only_changes_selection_over_the_palette() {
+        let mut state = ComposerState {
+            input: "/".to_string(),
+            ..Default::default()
+        };
+        let layout = ComposerLayout::for_render(2, (80, 24), SLASH_COMMANDS.len(), 0);
+        let over_palette = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 5,
+            row: layout.origin_row + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        let outside_palette = MouseEvent {
+            row: layout.origin_row,
+            ..over_palette
+        };
+
+        assert!(matches!(
+            handle_composer_mouse(over_palette, &mut state, &layout),
+            Some(ComposerAction::Continue)
+        ));
+        assert_eq!(
+            active_slash_completion(&state.input, &state.completion),
+            Some("/stats")
+        );
+        assert!(handle_composer_mouse(outside_palette, &mut state, &layout).is_none());
+        assert_eq!(
+            active_slash_completion(&state.input, &state.completion),
+            Some("/stats")
+        );
+    }
+
+    #[test]
+    fn composer_text_is_single_line_and_width_bounded() {
+        assert_eq!(
+            single_line_display("first\nsecond\tline"),
+            "first second line"
+        );
+        assert_eq!(truncate_display("abc", 0), "");
+        assert_eq!(truncate_display_start("abcdefgh", 5), "…efgh");
     }
 
     #[test]

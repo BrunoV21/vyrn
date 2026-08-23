@@ -131,6 +131,10 @@ model = "fake-small"
             if read == 0 {
                 break;
             }
+            if buffer[..read].windows(4).any(|bytes| bytes == b"\x1b[6n") {
+                reader.write_all(b"\x1b[11;1R").unwrap();
+                reader.flush().unwrap();
+            }
             reader_output
                 .lock()
                 .unwrap()
@@ -167,6 +171,389 @@ model = "fake-small"
     drop(master);
     reader_handle.join().unwrap();
     server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn inline_command_palette_runs_a_mouse_clicked_command() {
+    let temp = tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".vyrn")).unwrap();
+    std::fs::write(
+        temp.path().join(".vyrn/models.toml"),
+        r#"[models.local]
+base_url = "http://127.0.0.1:9/v1"
+model = "offline"
+api_key = ""
+"#,
+    )
+    .unwrap();
+
+    let (mut master, slave) = open_pty();
+    let stdin = slave.try_clone().unwrap();
+    let stdout = slave.try_clone().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .stdin(Stdio::from(stdin))
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let reader_output = Arc::clone(&output);
+    let mut reader = master.try_clone().unwrap();
+    let reader_handle = thread::spawn(move || {
+        let mut buffer = [0_u8; 2048];
+        while let Ok(read) = reader.read(&mut buffer) {
+            if read == 0 {
+                break;
+            }
+            if buffer[..read].windows(4).any(|bytes| bytes == b"\x1b[6n") {
+                reader.write_all(b"\x1b[11;1R").unwrap();
+                reader.flush().unwrap();
+            }
+            reader_output
+                .lock()
+                .unwrap()
+                .extend_from_slice(&buffer[..read]);
+        }
+    });
+
+    wait_for_pty_output(&output, "type / or press Ctrl+O for commands", 5);
+    master.write_all(b"/").unwrap();
+    master.flush().unwrap();
+    wait_for_pty_output(&output, "exit vyrn", 5);
+
+    // SGR mouse coordinates are one-based. With the fixed 120x30 PTY, /exit is
+    // the twelfth palette row beneath the composer anchored at row 11.
+    master.write_all(b"\x1b[<0;5;23m").unwrap();
+    master.flush().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "inline vyrn exited with {status}");
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("inline vyrn did not execute the mouse-clicked /exit command");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    drop(master);
+    reader_handle.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn fullscreen_header_controls_and_model_picker_support_mouse_clicks() {
+    let temp = tempdir().unwrap();
+    let project = temp
+        .path()
+        .join("this-is-a-deliberately-long-project-directory-for-header");
+    std::fs::create_dir_all(project.join(".vyrn")).unwrap();
+    std::fs::write(
+        project.join(".vyrn/models.toml"),
+        r#"[models.alpha]
+base_url = "http://127.0.0.1:9/v1"
+model = "offline-alpha"
+api_key = ""
+
+[models.beta]
+base_url = "http://127.0.0.1:9/v1"
+model = "offline-beta"
+api_key = ""
+"#,
+    )
+    .unwrap();
+
+    let (mut master, slave) = open_pty();
+    let stdin = slave.try_clone().unwrap();
+    let stdout = slave.try_clone().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("tui")
+        .current_dir(&project)
+        .env("HOME", temp.path())
+        .stdin(Stdio::from(stdin))
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let reader_output = Arc::clone(&output);
+    let mut reader = master.try_clone().unwrap();
+    let reader_handle = thread::spawn(move || {
+        let mut buffer = [0_u8; 4096];
+        while let Ok(read) = reader.read(&mut buffer) {
+            if read == 0 {
+                break;
+            }
+            reader_output
+                .lock()
+                .unwrap()
+                .extend_from_slice(&buffer[..read]);
+        }
+    });
+
+    wait_for_pty_output(&output, "message vyrn", 5);
+
+    // Header controls are stable because the deliberately long cwd is compacted
+    // to 30 columns in the fixed 120x30 viewport.
+    master.write_all(b"\x1b[<0;75;1M").unwrap();
+    master.flush().unwrap();
+    wait_for_pty_output_count(&output, "collapsed", 1, 5);
+
+    master.write_all(b"\x1b[<0;75;1M").unwrap();
+    master.flush().unwrap();
+    wait_for_pty_output_count(&output, "expanded", 1, 5);
+
+    // The boxed scratchpad button toggles its already-open panel closed, then open.
+    master.write_all(b"\x1b[<0;35;8M").unwrap();
+    master.flush().unwrap();
+    wait_for_pty_output_count(&output, "collapsed", 2, 5);
+
+    master.write_all(b"\x1b[<0;35;8M").unwrap();
+    master.flush().unwrap();
+    wait_for_pty_output_count(&output, "expanded", 2, 5);
+
+    master.write_all(b"\x1b[<0;83;1M").unwrap();
+    master.flush().unwrap();
+    wait_for_pty_output(&output, "cleared", 5);
+
+    master.write_all(b"\x1b[<0;55;1M").unwrap();
+    master.flush().unwrap();
+    wait_for_pty_output(&output, "model profiles", 5);
+
+    // The centered picker is 56x7; beta is its second inner row.
+    master.write_all(b"\x1b[<0;35;14M").unwrap();
+    master.flush().unwrap();
+    wait_for_pty_output(&output, "switched → beta", 5);
+
+    master.write_all(b"\x03").unwrap();
+    master.flush().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "fullscreen vyrn exited with {status}");
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("fullscreen vyrn did not execute the clicked header controls");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    drop(master);
+    reader_handle.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn fullscreen_tui_stays_clickable_while_streaming_a_real_turn() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (request_received_tx, request_received_rx) = mpsc::channel();
+    let (release_response_tx, release_response_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let body = read_http_body(&mut stream);
+        assert!(body.contains("Show the fullscreen marker"), "{body}");
+        request_received_tx.send(()).unwrap();
+        release_response_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
+        write_sse(
+            &mut stream,
+            r#"data: {"choices":[{"delta":{"content":"VYRN_FULLSCREEN_STREAM_OK"}}]}"#,
+        );
+    });
+
+    let temp = tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".vyrn")).unwrap();
+    std::fs::write(
+        temp.path().join(".vyrn/models.toml"),
+        format!(
+            r#"[models.local]
+base_url = "http://{addr}/v1"
+model = "fake-small"
+api_key = ""
+"#,
+        ),
+    )
+    .unwrap();
+
+    let (mut master, slave) = open_pty();
+    let stdin = slave.try_clone().unwrap();
+    let stdout = slave.try_clone().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("tui")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .stdin(Stdio::from(stdin))
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let reader_output = Arc::clone(&output);
+    let mut reader = master.try_clone().unwrap();
+    let reader_handle = thread::spawn(move || {
+        let mut buffer = [0_u8; 4096];
+        while let Ok(read) = reader.read(&mut buffer) {
+            if read == 0 {
+                break;
+            }
+            reader_output
+                .lock()
+                .unwrap()
+                .extend_from_slice(&buffer[..read]);
+        }
+    });
+
+    wait_for_pty_output(&output, "message vyrn", 5);
+    master.write_all(b"Show the fullscreen marker\r").unwrap();
+    master.flush().unwrap();
+    request_received_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    wait_for_pty_output(&output, "thinking", 5);
+
+    // The selected boxed scratchpad control remains clickable while the model
+    // response is deliberately held open by the test server.
+    master.write_all(b"\x1b[<0;35;8M").unwrap();
+    master.flush().unwrap();
+    wait_for_pty_output(&output, "inspector collaps", 5);
+
+    release_response_tx.send(()).unwrap();
+    wait_for_pty_output(&output, "VYRN_FULLSCREEN_STREAM_OK", 5);
+    wait_for_pty_output(&output, "turn spent:", 5);
+    master.write_all(b"/exit\r").unwrap();
+    master.flush().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "fullscreen vyrn exited with {status}");
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("fullscreen vyrn did not exit after /exit");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    drop(master);
+    reader_handle.join().unwrap();
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn fullscreen_tui_answers_ask_user_in_a_modal_and_continues_the_turn() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let server_bodies = Arc::clone(&bodies);
+    let server = thread::spawn(move || {
+        for index in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let body = read_http_body(&mut stream);
+            server_bodies.lock().unwrap().push(body);
+            match index {
+                0 => write_sse(
+                    &mut stream,
+                    r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_ask","type":"function","function":{"name":"ask_user","arguments":"{\"questions\":[{\"id\":\"scope\",\"header\":\"Scope\",\"question\":\"Which approach should I use?\",\"options\":[{\"label\":\"Core tool\",\"description\":\"Always available\"},{\"label\":\"Slash command\"}]}]}"}}]}}]}"#,
+                ),
+                1 => write_json(
+                    &mut stream,
+                    r#"{"choices":[{"message":{"role":"assistant","content":"- User selected Core tool."}}],"usage":{"prompt_tokens":60,"completion_tokens":10,"total_tokens":70}}"#,
+                ),
+                _ => write_sse(
+                    &mut stream,
+                    r#"data: {"choices":[{"delta":{"content":"VYRN_FULLSCREEN_ASK_USER_OK"}}]}"#,
+                ),
+            }
+        }
+    });
+
+    let temp = tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".vyrn")).unwrap();
+    std::fs::write(
+        temp.path().join(".vyrn/models.toml"),
+        format!(
+            r#"[models.local]
+base_url = "http://{addr}/v1"
+model = "fake-small"
+api_key = ""
+"#,
+        ),
+    )
+    .unwrap();
+
+    let (mut master, slave) = open_pty();
+    let stdin = slave.try_clone().unwrap();
+    let stdout = slave.try_clone().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("tui")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .stdin(Stdio::from(stdin))
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let reader_output = Arc::clone(&output);
+    let mut reader = master.try_clone().unwrap();
+    let reader_handle = thread::spawn(move || {
+        let mut buffer = [0_u8; 4096];
+        while let Ok(read) = reader.read(&mut buffer) {
+            if read == 0 {
+                break;
+            }
+            reader_output
+                .lock()
+                .unwrap()
+                .extend_from_slice(&buffer[..read]);
+        }
+    });
+
+    wait_for_pty_output(&output, "message vyrn", 5);
+    master.write_all(b"clarify before continuing\r").unwrap();
+    master.flush().unwrap();
+    wait_for_pty_output(&output, "Which approach should I use?", 5);
+    master.write_all(b"\r").unwrap();
+    master.flush().unwrap();
+    wait_for_pty_output(&output, "VYRN_FULLSCREEN_ASK_USER_OK", 5);
+    wait_for_pty_output(&output, "turn spent:", 5);
+    master.write_all(b"/exit\r").unwrap();
+    master.flush().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "fullscreen vyrn exited with {status}");
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("fullscreen vyrn did not exit after ask_user");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    drop(master);
+    reader_handle.join().unwrap();
+    server.join().unwrap();
+
+    let bodies = bodies.lock().unwrap();
+    assert!(bodies[2].contains("Core tool"), "{}", bodies[2]);
+    assert!(bodies[2].contains("call_ask"), "{}", bodies[2]);
 }
 
 #[test]
@@ -242,7 +629,10 @@ api_key = ""
     assert!(stdout.contains("[read_file ok]"));
     assert!(stdout.contains("[updating turn memory...]"), "{stdout}");
     assert!(stdout.contains("I read fixture.txt: hello from e2e."));
-    assert!(stdout.contains("turn scratchpad ("), "{stdout}");
+    assert!(
+        stdout.contains("turn scratchpad (16 provider tokens from generation response)"),
+        "{stdout}"
+    );
     assert!(stdout.contains("read_file saw fixture.txt"), "{stdout}");
     assert!(stdout.contains("turn spent:"));
 }
@@ -1040,6 +1430,28 @@ fn wait_for_pty_output(output: &Arc<Mutex<Vec<u8>>>, needle: &str, timeout_secon
             Instant::now() < deadline,
             "timed out waiting for {needle:?}; output:\n{}",
             String::from_utf8_lossy(&snapshot)
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_pty_output_count(
+    output: &Arc<Mutex<Vec<u8>>>,
+    needle: &str,
+    count: usize,
+    timeout_seconds: u64,
+) {
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    loop {
+        let snapshot = output.lock().unwrap().clone();
+        let rendered = String::from_utf8_lossy(&snapshot);
+        if rendered.matches(needle).count() >= count {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {count} occurrences of {needle:?}; output:\n{rendered}"
         );
         thread::sleep(Duration::from_millis(20));
     }

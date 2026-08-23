@@ -1,3 +1,4 @@
+pub mod fullscreen;
 pub mod render;
 pub mod repl;
 

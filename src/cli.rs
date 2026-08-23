@@ -31,12 +31,33 @@ pub struct Cli {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Commands {
+    /// Start the opt-in full-screen terminal interface.
+    Tui(TuiArgs),
     /// Initialize the local .vyrn directory and seed project config files.
     Init,
     /// Run JSON-defined live agent evals.
     Eval(EvalArgs),
     /// Write the local static debug trace viewer and print its path.
     DebugViewer(DebugViewerArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct TuiArgs {
+    /// Select a configured model profile before opening the interface.
+    #[arg(long, alias = "model")]
+    pub models: bool,
+
+    /// Override context budget for this session.
+    #[arg(long)]
+    pub context: Option<usize>,
+
+    /// Show full token counts and raw summaries.
+    #[arg(long)]
+    pub verbose: bool,
+
+    /// Show provider/network details and write structured session trace JSON.
+    #[arg(long)]
+    pub debug: bool,
 }
 
 #[derive(Debug, Clone, Args)]

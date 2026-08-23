@@ -97,4 +97,8 @@ impl App {
     pub async fn run(self) -> anyhow::Result<()> {
         Repl::new(self).run().await
     }
+
+    pub async fn run_tui(self) -> anyhow::Result<()> {
+        Repl::new(self).run_fullscreen().await
+    }
 }

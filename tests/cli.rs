@@ -1,7 +1,37 @@
 use clap::Parser;
 use std::process::{Command, Stdio};
 use tempfile::tempdir;
-use vyrn::cli::Cli;
+use vyrn::cli::{Cli, Commands};
+
+#[test]
+fn tui_subcommand_is_opt_in_and_accepts_session_flags() {
+    let parsed =
+        Cli::try_parse_from(["vyrn", "tui", "--debug", "--verbose", "--context", "2048"]).unwrap();
+
+    let Some(Commands::Tui(tui)) = parsed.command else {
+        panic!("expected tui subcommand");
+    };
+    assert!(tui.debug);
+    assert!(tui.verbose);
+    assert_eq!(tui.context, Some(2048));
+
+    let normal = Cli::try_parse_from(["vyrn"]).unwrap();
+    assert!(normal.command.is_none());
+}
+
+#[test]
+fn tui_rejects_programmatic_prompt_mode() {
+    let output = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .args(["--prompt", "do work", "tui"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("vyrn tui is interactive and cannot be combined with --prompt")
+    );
+}
 
 #[test]
 fn model_flag_alias_enables_startup_model_selection() {
