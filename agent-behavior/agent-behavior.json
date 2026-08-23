@@ -44,6 +44,27 @@
       ]
     },
     {
+      "id": "small-context-compaction",
+      "description": "A 1,200-token context must compact repeated tool output and retain an exact tail marker across the next user turn.",
+      "prompt": "Use read_file exactly twice on compaction-fixture.txt, then remember its exact tail marker and reply only READY.",
+      "follow_up_prompts": [
+        "Without using any tool, reply with the exact tail marker and nothing else."
+      ],
+      "max_turns": 8,
+      "context_tokens": 1200,
+      "assertions": [
+        {
+          "type": "assistant_equals",
+          "value": "VYRN_COMPACT_EXACT_VIOLET_92017"
+        },
+        {
+          "type": "tool_called_exactly",
+          "name": "read_file",
+          "count": 2
+        }
+      ]
+    },
+    {
       "id": "live-steering",
       "description": "Human steering must supersede a proposed action before the next agent decision.",
       "prompt": "Use write_file to create obsolete.txt containing SHOULD_NOT_EXIST, then report completion.",

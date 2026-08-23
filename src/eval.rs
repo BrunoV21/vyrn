@@ -7,9 +7,8 @@ use crate::agent::tokens::{
 };
 use crate::agent::transcript::{Exchange, truncate};
 use crate::agent::turn::{
-    TurnScratchpad, apply_live_steering_to_tool_batch,
-    build_fitted_turn_scratchpad_update_messages, build_turn_messages, prepare_next_turn_context,
-    turn_scratchpad_update_source,
+    TurnScratchpad, apply_live_steering_to_tool_batch, build_turn_messages,
+    prepare_next_turn_context, update_turn_scratchpad,
 };
 use crate::cli::EvalArgs;
 use crate::config::{ConfigSources, EffectiveConfig, ModelProfile, ModelRegistry};
@@ -58,6 +57,8 @@ pub struct EvalCase {
     #[serde(default)]
     pub max_turns: Option<usize>,
     #[serde(default)]
+    pub context_tokens: Option<usize>,
+    #[serde(default)]
     pub steering: Vec<EvalSteering>,
     #[serde(default)]
     pub assertions: Vec<EvalAssertion>,
@@ -80,6 +81,9 @@ pub enum EvalAssertion {
     AssistantContains {
         value: String,
     },
+    AssistantEquals {
+        value: String,
+    },
     AssistantNotContains {
         value: String,
     },
@@ -87,6 +91,10 @@ pub enum EvalAssertion {
         name: String,
     },
     ToolCalledAtLeast {
+        name: String,
+        count: usize,
+    },
+    ToolCalledExactly {
         name: String,
         count: usize,
     },
@@ -261,9 +269,13 @@ pub async fn run(args: EvalArgs, context_override: Option<usize>) -> anyhow::Res
         std::fs::create_dir_all(&trace_dir)
             .with_context(|| format!("failed to create {}", trace_dir.display()))?;
         let model = resolve_case_model(&models, &suite, case, args.model.as_deref())?;
+        let mut case_config = config.clone();
+        if let Some(context_tokens) = case.context_tokens {
+            case_config.context.max_tokens = context_tokens;
+        }
         let mut runner = EvalAgentRunner::new(
             sources.clone(),
-            config.clone(),
+            case_config,
             models.clone(),
             model.clone(),
             !args.no_debug,
@@ -359,6 +371,12 @@ fn validate_suite(suite: &EvalSuite) -> anyhow::Result<()> {
         }
         if case.prompt.trim().is_empty() {
             anyhow::bail!("eval case '{}' prompt cannot be empty", case.id);
+        }
+        if case.context_tokens.is_some_and(|tokens| tokens < 512) {
+            anyhow::bail!(
+                "eval case '{}' context_tokens must be at least 512",
+                case.id
+            );
         }
         if case
             .follow_up_prompts
@@ -608,6 +626,14 @@ async fn evaluate_assertion(
                 message: format!("assistant contains '{value}'"),
             }
         }
+        EvalAssertion::AssistantEquals { value } => {
+            let passed = trace.final_assistant.trim() == value.trim();
+            AssertionOutcome {
+                assertion: assertion.clone(),
+                passed,
+                message: format!("assistant exactly equals '{value}'"),
+            }
+        }
         EvalAssertion::AssistantNotContains { value } => {
             let passed = !trace.final_assistant.contains(value);
             AssertionOutcome {
@@ -639,6 +665,18 @@ async fn evaluate_assertion(
                 message: format!(
                     "tool '{name}' was called {actual} time(s), expected at least {count}"
                 ),
+            }
+        }
+        EvalAssertion::ToolCalledExactly { name, count } => {
+            let actual = trace
+                .tool_calls
+                .iter()
+                .filter(|call| call.function.name == *name)
+                .count();
+            AssertionOutcome {
+                assertion: assertion.clone(),
+                passed: actual == *count,
+                message: format!("tool '{name}' was called {actual} time(s), expected {count}"),
             }
         }
         EvalAssertion::ToolNotCalled { name } => {
@@ -1211,16 +1249,7 @@ impl EvalAgentRunner {
                 }
                 trace.tool_calls.push(call);
             }
-            scratchpad = self
-                .update_turn_scratchpad(
-                    &scratchpad,
-                    &current_tool_batch,
-                    &assistant_tool_message,
-                    &mut usage,
-                    round,
-                    tool_count.saturating_sub(1),
-                )
-                .await?;
+            scratchpad = update_turn_scratchpad(&scratchpad, &current_tool_batch);
             let next_context = prepare_next_turn_context(
                 &base_messages,
                 &scratchpad,
@@ -1283,105 +1312,6 @@ impl EvalAgentRunner {
             return Err(LlmError::ToolRoundLimit { rounds: max_rounds });
         }
         Ok(())
-    }
-
-    async fn update_turn_scratchpad(
-        &mut self,
-        scratchpad: &TurnScratchpad,
-        consumed_tool_batch: &[ChatMessage],
-        assistant_response: &ChatMessage,
-        usage: &mut TurnUsage,
-        round: usize,
-        tool_index: usize,
-    ) -> Result<TurnScratchpad, LlmError> {
-        let source = turn_scratchpad_update_source(consumed_tool_batch, assistant_response);
-        let messages = build_fitted_turn_scratchpad_update_messages(
-            &scratchpad.summary,
-            &source,
-            self.config.context.max_tokens,
-        );
-        let estimated_input_tokens = estimate_messages_breakdown(&messages).total();
-        self.debug_log(format!(
-            "turn_scratchpad_request input_estimate={} source_chars={} previous_chars={}",
-            estimated_input_tokens,
-            messages
-                .get(1)
-                .and_then(ChatMessage::content_text)
-                .map(|content| content.chars().count())
-                .unwrap_or_default(),
-            scratchpad.summary.chars().count()
-        ));
-        let request = ChatCompletionRequest {
-            model: String::new(),
-            messages,
-            tools: Vec::new(),
-            tool_choice: None,
-            stream: false,
-            stream_options: None,
-            max_tokens: Some(384),
-        };
-        let pending_trace = self.llm_trace.as_ref().map(|llm_trace| {
-            llm_trace.begin_call(
-                &self.client,
-                &request,
-                false,
-                TraceMetadata {
-                    action_type: "turn_scratchpad",
-                    label: Some("turn-scratchpad".to_string()),
-                    turn_index: Some(self.stats.turns.len()),
-                    round_index: Some(round),
-                    tool_index: Some(tool_index),
-                    estimated_input_tokens: Some(estimated_input_tokens),
-                    context_limit: Some(self.config.context.max_tokens),
-                    ..TraceMetadata::default()
-                },
-            )
-        });
-        let response_result = self.client.complete_chat(request).await;
-        if let (Some(llm_trace), Some(pending_trace)) = (self.llm_trace.as_mut(), pending_trace) {
-            let _ = llm_trace.finish_call(pending_trace, &response_result);
-        }
-        let response = response_result?;
-        let summary = response
-            .choices
-            .first()
-            .and_then(|choice| choice.message.content_text().map(str::trim))
-            .filter(|summary| !summary.is_empty())
-            .ok_or_else(|| {
-                LlmError::Input("turn scratchpad update returned an empty summary".to_string())
-            })?
-            .to_string();
-        let provider_usage = response.usage;
-        let input = if provider_usage.is_some_and(|usage| usage.prompt_tokens > 0) {
-            TokenCount::provider(provider_usage.unwrap_or_default().prompt_tokens)
-        } else {
-            TokenCount::estimate(estimated_input_tokens)
-        };
-        let output = if provider_usage.is_some_and(|usage| usage.completion_tokens > 0) {
-            TokenCount::provider(provider_usage.unwrap_or_default().completion_tokens)
-        } else {
-            TokenCount::estimate(estimate_text_tokens(&summary))
-        };
-        usage.add_model_call_with_breakdown(
-            "turn-scratchpad",
-            input,
-            output,
-            input.tokens + output.tokens,
-            TokenBreakdown {
-                summary_inputs: input.tokens,
-                summary_outputs: output.tokens,
-                ..TokenBreakdown::default()
-            },
-        );
-        self.debug_log(format!(
-            "turn_scratchpad_response input_tokens={} input_source={} output_tokens={} output_source={} summary_tokens={}",
-            input.tokens,
-            input.source.label(),
-            output.tokens,
-            output.source.label(),
-            estimate_text_tokens(&summary)
-        ));
-        Ok(TurnScratchpad { summary })
     }
 
     async fn execute_tool_call(
@@ -1461,6 +1391,7 @@ mod tests {
                     follow_up_prompts: Vec::new(),
                     model: None,
                     max_turns: None,
+                    context_tokens: None,
                     steering: Vec::new(),
                     assertions: vec![EvalAssertion::AssistantContains {
                         value: "ok".to_string(),
@@ -1473,6 +1404,7 @@ mod tests {
                     follow_up_prompts: Vec::new(),
                     model: None,
                     max_turns: None,
+                    context_tokens: None,
                     steering: Vec::new(),
                     assertions: vec![EvalAssertion::AssistantContains {
                         value: "ok".to_string(),
@@ -1493,6 +1425,24 @@ mod tests {
         let outcome = evaluate_assertion(
             &EvalAssertion::AssistantContains {
                 value: "hello".to_string(),
+            },
+            &trace,
+            &models,
+            &trace.model,
+            None,
+        )
+        .await;
+
+        assert!(outcome.passed);
+    }
+
+    #[tokio::test]
+    async fn assistant_equals_assertion_checks_trimmed_final_text() {
+        let trace = sample_trace("VYRN_EXACT\n", Vec::new());
+        let models = ModelRegistry::default();
+        let outcome = evaluate_assertion(
+            &EvalAssertion::AssistantEquals {
+                value: "VYRN_EXACT".to_string(),
             },
             &trace,
             &models,
@@ -1526,6 +1476,30 @@ mod tests {
         .await;
 
         assert!(outcome.passed, "{}", outcome.message);
+    }
+
+    #[tokio::test]
+    async fn tool_called_exactly_assertion_rejects_follow_up_reloads() {
+        let calls = vec![
+            tool_call("call_1", "read_file"),
+            tool_call("call_2", "read_file"),
+            tool_call("call_3", "read_file"),
+        ];
+        let trace = sample_trace("done", calls);
+        let models = ModelRegistry::default();
+        let outcome = evaluate_assertion(
+            &EvalAssertion::ToolCalledExactly {
+                name: "read_file".to_string(),
+                count: 2,
+            },
+            &trace,
+            &models,
+            &trace.model,
+            None,
+        )
+        .await;
+
+        assert!(!outcome.passed, "{}", outcome.message);
     }
 
     #[test]
@@ -1567,6 +1541,7 @@ mod tests {
                 follow_up_prompts: Vec::new(),
                 model: None,
                 max_turns: None,
+                context_tokens: None,
                 steering: Vec::new(),
                 assertions: Vec::new(),
             },

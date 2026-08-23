@@ -11,17 +11,10 @@ fn eval_runs_json_suite_and_writes_traces() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
-        for _ in 0..3 {
+        for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             let body = read_http_body(&mut stream);
-            if body.contains("Current scratchpad")
-                || body.contains("New consumed tool batch and assistant response")
-            {
-                write_json(
-                    &mut stream,
-                    r#"{"choices":[{"message":{"role":"assistant","content":"- read_file saw fixture.txt: hello from eval."}}],"usage":{"prompt_tokens":80,"completion_tokens":16,"total_tokens":96}}"#,
-                );
-            } else if body.contains("[turn scratchpad]") {
+            if body.contains("[turn scratchpad]") {
                 write_sse(
                     &mut stream,
                     r#"data: {"choices":[{"delta":{"content":"fixture.txt says hello from eval."}}]}"#,
@@ -186,15 +179,6 @@ fn eval_compacts_large_intermediate_tool_outputs_under_context_budget() {
             let (mut stream, _) = listener.accept().unwrap();
             let body = read_http_body(&mut stream);
             server_bodies.lock().unwrap().push(body.clone());
-            if body.contains("Current scratchpad")
-                || body.contains("New consumed tool batch and assistant response")
-            {
-                write_json(
-                    &mut stream,
-                    r#"{"choices":[{"message":{"role":"assistant","content":"- large.txt was read and contained LARGE_CONTEXT_MARKER."}}],"usage":{"prompt_tokens":90,"completion_tokens":18,"total_tokens":108}}"#,
-                );
-                continue;
-            }
             if agent_round < 2 {
                 write_sse(
                     &mut stream,
@@ -240,6 +224,7 @@ api_key = ""
       "id": "large-tools",
       "prompt": "Read large.txt twice, then reply LARGE_CONTEXT_DONE.",
       "max_turns": 5,
+      "context_tokens": 1200,
       "assertions": [
         { "type": "assistant_contains", "value": "LARGE_CONTEXT_DONE" },
         { "type": "tool_called", "name": "read_file" }
@@ -255,8 +240,6 @@ api_key = ""
     let output = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .current_dir(temp.path())
         .env("HOME", temp.path())
-        .arg("--context")
-        .arg("1200")
         .arg("eval")
         .arg("evals/context.json")
         .arg("--output")
@@ -277,6 +260,11 @@ api_key = ""
         serde_json::from_str(&std::fs::read_to_string(&trace_path).unwrap()).unwrap();
     let requests = trace["requests"].as_array().unwrap();
     assert_eq!(requests.len(), 3, "{trace}");
+    assert!(
+        requests[2].to_string().contains("LARGE_CONTEXT_MARKER"),
+        "{}",
+        requests[2]
+    );
     for request in requests {
         let tokens = request["estimated_input_tokens"].as_u64().unwrap();
         assert!(tokens <= 1200, "tokens={tokens}\n{request}");
@@ -300,6 +288,7 @@ api_key = ""
     assert!(debug_log.contains("tool_chain_prepare"), "{debug_log}");
     assert!(debug_log.contains("before_tokens="), "{debug_log}");
     assert!(debug_log.contains("after_tokens="), "{debug_log}");
+    assert!(debug_log.contains("threshold=840"), "{debug_log}");
 }
 
 #[test]
@@ -326,15 +315,6 @@ fn eval_processes_many_large_tool_calls_incrementally() {
                 continue;
             }
             server_bodies.lock().unwrap().push(body.clone());
-            if body.contains("Current scratchpad")
-                || body.contains("New consumed tool batch and assistant response")
-            {
-                write_json(
-                    &mut stream,
-                    r#"{"choices":[{"message":{"role":"assistant","content":"- one large file result was processed and compacted."}}],"usage":{"prompt_tokens":90,"completion_tokens":18,"total_tokens":108}}"#,
-                );
-                continue;
-            }
             if agent_requests == 0 {
                 let event = serde_json::json!({
                     "choices": [{
@@ -484,7 +464,7 @@ fn eval_runs_multi_turn_memory_case_with_exact_recent_anchor() {
                 ),
                 1 => write_json(
                     &mut stream,
-                    r#"{"choices":[{"message":{"role":"assistant","content":"The user asked vyrn to remember VYRN_MEMORY_VIOLET_48291."}}]}"#,
+                    r#"{"choices":[{"message":{"role":"assistant","content":"CORRUPT_PARTIAL_SUMMARY"},"finish_reason":"length"}],"usage":{"prompt_tokens":80,"completion_tokens":385,"total_tokens":465}}"#,
                 ),
                 _ => write_sse(
                     &mut stream,
@@ -544,17 +524,27 @@ model = "fake-small"
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 3);
     assert!(
-        bodies[2].contains("session goal (verbatim)"),
+        bodies[2].contains("session goal (bounded verbatim)"),
         "{}",
         bodies[2]
     );
     assert!(
-        bodies[2].contains("most recent exchange (verbatim anchor)"),
+        bodies[2].contains("most recent exchange (bounded verbatim anchor)"),
         "{}",
         bodies[2]
     );
     assert!(
         bodies[2].contains("VYRN_MEMORY_VIOLET_48291"),
+        "{}",
+        bodies[2]
+    );
+    assert!(
+        bodies[2].contains("Recent exchange checkpoint"),
+        "{}",
+        bodies[2]
+    );
+    assert!(
+        !bodies[2].contains("CORRUPT_PARTIAL_SUMMARY"),
         "{}",
         bodies[2]
     );

@@ -1,0 +1,10 @@
+This fixture deliberately contains enough repetitive terminal-style output to pressure a small context window.
+alpha-0001 alpha-0002 alpha-0003 alpha-0004 alpha-0005 alpha-0006 alpha-0007 alpha-0008 alpha-0009 alpha-0010
+beta-0001 beta-0002 beta-0003 beta-0004 beta-0005 beta-0006 beta-0007 beta-0008 beta-0009 beta-0010
+gamma-0001 gamma-0002 gamma-0003 gamma-0004 gamma-0005 gamma-0006 gamma-0007 gamma-0008 gamma-0009 gamma-0010
+delta-0001 delta-0002 delta-0003 delta-0004 delta-0005 delta-0006 delta-0007 delta-0008 delta-0009 delta-0010
+epsilon-0001 epsilon-0002 epsilon-0003 epsilon-0004 epsilon-0005 epsilon-0006 epsilon-0007 epsilon-0008 epsilon-0009 epsilon-0010
+zeta-0001 zeta-0002 zeta-0003 zeta-0004 zeta-0005 zeta-0006 zeta-0007 zeta-0008 zeta-0009 zeta-0010
+eta-0001 eta-0002 eta-0003 eta-0004 eta-0005 eta-0006 eta-0007 eta-0008 eta-0009 eta-0010
+theta-0001 theta-0002 theta-0003 theta-0004 theta-0005 theta-0006 theta-0007 theta-0008 theta-0009 theta-0010
+The exact tail marker is VYRN_COMPACT_EXACT_VIOLET_92017
