@@ -31,13 +31,16 @@ The rolling summary is not the only memory source. vyrn ignores greetings when
 selecting the first meaningful goal, keeps bounded verbatim anchors for that
 goal and the most recent exchange, and accumulates an authoritative bounded
 tool checkpoint. Checkpoints retain exact tool arguments and head-and-tail
-result excerpts. Empty or capped summary responses use a deterministic exchange
-fallback instead of silently erasing previous context.
+result excerpts, plus a compact count of completed tools. Result evidence and
+tool inputs have separate bounds, so severe pressure drops repeatable inputs
+before exact result edges. Empty or capped summary responses use a deterministic
+exchange fallback instead of silently erasing previous context.
 
 Within a tool chain, vyrn starts pruning at 70% of the configured context
 budget. This leaves headroom for provider-tokenizer differences and the next
 model response instead of waiting until the estimated prompt already reaches
-the hard limit.
+the hard limit. If reaching that target would erase all retained result
+evidence, vyrn keeps a fact-preserving candidate below the hard limit instead.
 
 ## What summaries drop
 

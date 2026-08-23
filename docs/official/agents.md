@@ -42,7 +42,8 @@ scripts/run-agent-behavior-tests.sh --case conversation-memory
 
 Configure model profiles in `agent-behavior/models.toml`, select the default
 matrix in `agent-behavior/models.list`, and provide secrets through the named
-`api_key_env` environment variables.
+`api_key_env` environment variables. The runner automatically loads a
+repository-local `.env` file when present; `.env` is excluded from Git.
 
 Published package shape:
 

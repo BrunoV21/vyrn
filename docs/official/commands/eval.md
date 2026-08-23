@@ -69,7 +69,9 @@ by `cargo test`.
 
 Model profiles live in `agent-behavior/models.toml`; `models.list` selects the
 profiles run by default. Add a TOML profile and one list entry to expand the
-matrix. Use `api_key_env` so keys remain in environment variables.
+matrix. Use `api_key_env` so keys remain in environment variables. The runner
+loads an ignored repository-local `.env` file before starting its isolated
+workspaces.
 
 ## Multi-turn and steering cases
 

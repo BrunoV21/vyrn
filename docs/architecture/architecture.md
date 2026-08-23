@@ -231,7 +231,7 @@ The system prompt has four compact sections:
 
 ```text
 [role] terminal coding agent. conserve tokens.
-[rules] use tools when needed. trust tool results; do not invent missing facts. use read_image for image files. prefer batch for shell. keep outputs compact.
+[rules] use tools when needed. trust tool results and exact scratchpad text. do not repeat completed tools or invent missing facts. use read_image for image files. prefer batch for shell. keep outputs compact.
 [tools] {{tools}}
 {{manifest}}
 {{available_skills}}

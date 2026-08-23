@@ -315,8 +315,10 @@ The model decides what to keep. General heuristics it is instructed to follow:
 The first meaningful user goal (greetings are ignored), a bounded exact copy of
 the most recent exchange, and a bounded authoritative tool checkpoint are
 deterministic memory anchors rather than model-authored summaries. Tool
-checkpoints retain exact call arguments plus bounded head-and-tail result
-excerpts. Empty or output-limit-truncated summary responses fall back to an
+checkpoints retain compact completed-tool counts, separately bounded exact call
+arguments, and bounded head-and-tail result excerpts. Under severe pressure,
+repeatable call inputs are discarded before exact result edges. Empty or
+output-limit-truncated summary responses fall back to an
 exact bounded exchange checkpoint instead of replacing valid memory.
 
 ### 10.3 Pruning Aggressiveness
@@ -364,8 +366,9 @@ Typing `/`, pressing `Ctrl+O`, or pressing `F1` opens the command palette;
 Up/Down selects a command and `Tab` accepts it.
 When the model calls `ask_user`, vyrn renders a clarification prompt with
 selectable options and a freeform reply path, then continues the same turn.
-With inspect visible, every interaction exposes its retained scratchpad (or an
-explicit `none`) and its estimated retained-token footprint. Tool rows remain collapsed until the user clicks one to
+With inspect visible, every interaction exposes the rolling summary supplied to
+that turn and its retained scratchpad (each with an explicit `none` when absent),
+plus their estimated retained-token footprints. Tool rows remain collapsed until the user clicks one to
 inspect its input, output preview, and attached tool-batch scratchpad. Tool-row
 disclosure remains available whenever trace is visible; opening its scratchpad
 activates inspect.
@@ -436,6 +439,7 @@ project-local override file and lets the user select one with Up/Down and Enter.
 | `/models` | Switch model mid-session; `/model` is an alias |
 | `/stats` | Show provider usage, labeled estimates, and token savings for the session |
 | `/context` | Show estimated context used/available plus provider and fallback token state |
+| `/summary` | Show the current model-generated rolling summary and its estimated retained size |
 | `/scratchpad` | Show the latest evolving tool-turn scratchpad |
 | `/manifest` | Print current machine manifest |
 | `/refresh` | Trigger `refresh_manifest` manually |
@@ -466,8 +470,8 @@ Debug mode keeps the normal UI compact while making LLM traffic auditable:
   counts. API keys and authorization headers are not written.
 - Schema-v2 calls carry `action_scope: interaction|harness`. The viewer renders
   human/agent calls separately from rolling-summary and eval-judge mechanisms.
-  Deterministic scratchpads remain visible in the agent requests that consume
-  them and in the interactive scratchpad inspector.
+  Rolling summaries and deterministic scratchpads remain visible in the agent
+  requests that consume them and in current/per-interaction inspectors.
 - Streaming requests ask OpenAI-compatible providers to include usage. Internal
   rolling-summary completions are capped at 384 output tokens. A length finish
   reason or provider count at that cap activates deterministic fallback memory.

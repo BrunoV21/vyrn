@@ -44,6 +44,7 @@ flowchart TB
   Fallback --> NewSummary
   HasPrevious -- "first turn" --> Prompt
   NewSummary --> Prompt
+  NewSummary -. "capture for request N" .-> SummaryInspect["Current and per-interaction<br/>rolling-summary inspectors"]
   Before -. "stable anchors" .-> Prompt["Prompt memory for request N<br/>goal + new summary + exact tool memory<br/>+ bounded previous exchange"]
   Prompt --> Agent["Agent and tool loop for request N"]
   Agent --> Completed["Completed Exchange N<br/>request + answer + tools + final scratchpad"]
@@ -57,7 +58,7 @@ flowchart TB
   classDef decision fill:#151A22,stroke:#F5A524,color:#F3F7FB
   class Before,NewSummary,After,Transcript store
   class SummaryCall model
-  class Fallback,Prompt,Agent,Completed,Update local
+  class Fallback,Prompt,Agent,Completed,Update,SummaryInspect local
   class HasPrevious,Valid decision
 ```
 
@@ -65,6 +66,11 @@ The summary call sees the previous exchange and old summary. Agent calls receive
 the newly composed prompt memory: session goal, rewritten summary, exact tool
 memory, and a bounded anchor of that same previous exchange. Older raw exchanges
 are not retained as model messages.
+
+The full-screen TUI snapshots the rolling summary at this boundary. Its current
+summary inspector shows the latest retained state, while each interaction's
+summary control shows the exact state supplied to that interaction. The first
+interaction therefore reports `none` instead of borrowing a later summary.
 
 ## Within-turn tool flow
 
@@ -115,12 +121,14 @@ flowchart TB
   Prompt["Actual prompt composition"] --> Sections["Estimate context total<br/>and per-section attribution"]
   Raw[("Raw-history token counter")] --> Savings["Estimate full-history baseline<br/>and history savings"]
   Sections --> Savings
+  SummaryText["Rolling summary text"] --> SummarySize["Estimate retained footprint"]
   Scratch["Deterministic scratchpad text"] --> ScratchSize["Estimate retained footprint"]
 
   Ledger --> Stats["Context bar and turn/session stats"]
   Sections --> Stats
   Savings --> Stats
-  ScratchSize --> Inspect["Per-interaction scratchpad metadata"]
+  SummarySize --> Inspect
+  ScratchSize --> Inspect["Current and per-interaction<br/>memory inspectors"]
   Calls --> Trace[("Debug trace JSON<br/>model calls only")]
 
   classDef model fill:#151A22,stroke:#A78BFA,color:#F3F7FB
@@ -129,7 +137,7 @@ flowchart TB
   classDef decision fill:#151A22,stroke:#F5A524,color:#F3F7FB
   class Calls model
   class Raw,Ledger,Trace store
-  class Provider,Fallback,Prompt,Sections,Savings,Scratch,ScratchSize,Stats,Inspect local
+  class Provider,Fallback,Prompt,Sections,Savings,SummaryText,SummarySize,Scratch,ScratchSize,Stats,Inspect local
   class Usage decision
 ```
 

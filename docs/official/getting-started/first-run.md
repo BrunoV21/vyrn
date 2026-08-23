@@ -85,6 +85,7 @@ Useful local commands inside the session:
 /models     switch model profile
 /stats      show provider usage, estimates, and savings
 /context    show context used and available
+/summary    show the current rolling summary
 /scratchpad show the latest turn scratchpad
 /manifest   print compact machine manifest
 /refresh    rescan manifest

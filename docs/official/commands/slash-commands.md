@@ -55,6 +55,13 @@ Show estimated context used and still available, rolling-summary and raw-history
 size, provider-reported session tokens, fallback estimates, and estimated
 history savings.
 
+## `/summary`
+
+Show the current model-generated rolling summary and its estimated retained
+prompt footprint. In the full-screen TUI, the interaction-level summary controls
+open the exact rolling summary that was supplied to each turn; the first
+interaction explicitly reports that no previous exchange existed.
+
 ## `/scratchpad`
 
 Show the latest compact scratchpad produced while tools were running in the last

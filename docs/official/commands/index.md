@@ -34,6 +34,7 @@ Slash commands operate inside an active `vyrn` session.
 | `/models` | Switch model profile mid-session. |
 | `/stats` | Show provider usage, labeled estimates, and savings. |
 | `/context` | Show context used, available, and retained. |
+| `/summary` | Show the current rolling summary. |
 | `/scratchpad` | Show the latest evolving turn scratchpad. |
 | `/manifest` | Print the current machine manifest. |
 | `/refresh` | Trigger `refresh_manifest` manually. |

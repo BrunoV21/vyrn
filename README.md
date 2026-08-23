@@ -20,7 +20,8 @@ The interactive interface uses native terminal scrollback with `crossterm` raw-m
 An opt-in `vyrn tui` command previews a full-screen layout with persistent
 context telemetry, inspector controls, transcript, composer, and session stats.
 Its header, inspect strip, command palette, and model picker support mouse
-clicks. Inspect mode adds per-interaction scratchpad controls and independently
+clicks. Inspect mode adds current and per-interaction rolling-summary and
+scratchpad controls, while independently
 expandable trace tool rows stay collapsed by default and expose their attached
 scratchpad when opened. The native-scrollback interface remains the default.
 
@@ -162,6 +163,7 @@ Inside a session, local control commands are handled by vyrn:
 /models     switch model profile
 /stats      show provider usage, estimates, and savings
 /context    show context used and available
+/summary    show the current rolling summary
 /scratchpad show the latest evolving turn scratchpad
 /manifest   print compact machine manifest
 /refresh    rescan manifest

@@ -67,11 +67,12 @@ latest output. Click the active model name to open the model picker, click a
 model row to switch, and use the clickable header and inspect-strip controls for
 trace, inspect, clear, refresh, and inspector views. Alt shortcuts mirror those
 controls; `/help` lists the complete key map. The inspect strip presents boxed
-`help`, `stats`, `context`, `scratchpad`, `manifest`, `skills`, and `refresh`
+`help`, `stats`, `context`, `summary`, `scratchpad`, `manifest`, `skills`, and `refresh`
 buttons. Clicking the selected inspector button again collapses its panel.
-With inspect visible, each interaction also exposes its own scratchpad control;
-turns without tool-driven compaction explicitly show `none`. Labels show the
-estimated token footprint of the deterministic checkpoint. Tool rows start collapsed; click a row
+With inspect visible, each interaction also exposes its own rolling-summary and
+scratchpad controls. The first turn has no rolling summary, and turns without
+tool-driven compaction have no scratchpad; both states explicitly show `none`.
+Labels show estimated retained footprints. Tool rows start collapsed; click a row
 to reveal or hide its input and output preview independently whenever trace is
 visible. Expanded tool details include the deterministic scratchpad attached
 to that tool batch; opening it also opens inspect.
